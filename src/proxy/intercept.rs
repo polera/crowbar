@@ -36,10 +36,6 @@ impl InterceptState {
         !prev
     }
 
-    pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Relaxed);
-    }
-
     /// Called by the proxy when a request should be intercepted.
     /// Sends the request to the TUI and returns a receiver for the decision.
     /// Returns None if the channel to the TUI is closed.
@@ -87,7 +83,4 @@ impl InterceptState {
         }
     }
 
-    pub fn pending_count(&self) -> usize {
-        self.pending.len()
-    }
 }

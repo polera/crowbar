@@ -1,7 +1,6 @@
 mod app;
 mod channel;
 mod config;
-mod error;
 mod event;
 mod http;
 mod proxy;

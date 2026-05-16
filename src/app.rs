@@ -188,6 +188,7 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(req) = self.intercept_queue.pop_front() {
+                    self.store.mark_dropped(req.id);
                     self.intercept_state
                         .resolve(req.id, InterceptDecision::Drop);
                     self.intercept_scroll = 0;
@@ -495,7 +496,6 @@ impl App {
             ProxyToUi::InterceptedRequest(req) => {
                 self.intercept_queue.push_back(req);
             }
-            ProxyToUi::StatusUpdate { .. } => {}
             ProxyToUi::RepeaterResponse(resp) => {
                 self.repeater_pending = false;
                 self.repeater_response = Some(resp);

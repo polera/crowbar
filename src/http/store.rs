@@ -53,10 +53,6 @@ impl InMemoryStore {
         }
     }
 
-    pub fn get(&self, id: RequestId) -> Option<&HistoryEntry> {
-        self.index.get(&id).and_then(|&idx| self.entries.get(idx))
-    }
-
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
     }

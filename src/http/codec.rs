@@ -80,7 +80,3 @@ pub fn lines_to_request(lines: &[String], original: &RequestData) -> RequestData
         timestamp: original.timestamp,
     }
 }
-
-pub fn request_to_text(req: &RequestData) -> String {
-    request_to_lines(req).join("\n")
-}
