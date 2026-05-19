@@ -11,8 +11,6 @@ pub enum RuleTarget {
 }
 
 impl RuleTarget {
-    pub const ALL: [RuleTarget; 3] = [RuleTarget::Request, RuleTarget::Response, RuleTarget::Both];
-
     pub fn label(self) -> &'static str {
         match self {
             RuleTarget::Request => "Request",
@@ -39,8 +37,6 @@ pub enum RuleScope {
 }
 
 impl RuleScope {
-    pub const ALL: [RuleScope; 4] = [RuleScope::Url, RuleScope::Headers, RuleScope::Body, RuleScope::All];
-
     pub fn label(self) -> &'static str {
         match self {
             RuleScope::Url => "URL",

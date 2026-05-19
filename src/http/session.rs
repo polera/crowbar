@@ -43,25 +43,6 @@ pub fn load(path: &Path) -> anyhow::Result<Vec<HistoryEntry>> {
     Ok(session.entries)
 }
 
-pub fn list_sessions() -> anyhow::Result<Vec<(String, PathBuf)>> {
-    let dir = sessions_dir()?;
-    let mut sessions = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "json") {
-            let name = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            sessions.push((name, path));
-        }
-    }
-    sessions.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(sessions)
-}
-
 pub fn auto_save_name() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

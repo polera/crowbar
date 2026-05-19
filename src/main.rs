@@ -11,6 +11,7 @@ mod tui;
 
 use std::sync::Arc;
 
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -59,28 +60,29 @@ async fn main() -> anyhow::Result<()> {
 
     let rules: SharedRules = Arc::new(std::sync::RwLock::new(Vec::new()));
 
-    let cancel = CancellationToken::new();
+    let mut cancel = CancellationToken::new();
 
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<ProxyToUi>();
     let app_tx = ui_tx.clone();
 
+    let listener = TcpListener::bind(config.bind).await?;
     let server = ProxyServer::new(
         config.bind,
         ui_tx,
-        cert_cache,
+        cert_cache.clone(),
         intercept.clone(),
         scope.clone(),
         rules.clone(),
         cancel.clone(),
     );
     tokio::spawn(async move {
-        if let Err(e) = server.run().await {
+        if let Err(e) = server.run(listener).await {
             tracing::error!("Proxy server error: {}", e);
         }
     });
 
     let mut tui = terminal::init()?;
-    let mut app = App::new(config.bind, intercept.clone(), scope, rules, app_tx);
+    let mut app = App::new(config.bind, intercept.clone(), scope.clone(), rules.clone(), app_tx);
 
     if let Some(path) = config.load {
         app.load_session(&path);
@@ -88,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut events = EventLoop::new(ui_rx);
 
-    let result = run_app(&mut tui, &mut app, &mut events).await;
+    let result = run_app(&mut tui, &mut app, &mut events, cert_cache, &mut cancel).await;
 
     info!("Shutting down");
     cancel.cancel();
@@ -107,6 +109,8 @@ async fn run_app(
     tui: &mut terminal::Tui,
     app: &mut App,
     events: &mut EventLoop,
+    cert_cache: Arc<CertCache>,
+    cancel: &mut CancellationToken,
 ) -> anyhow::Result<()> {
     loop {
         tui.draw(|frame| app.render(frame))?;
@@ -120,6 +124,42 @@ async fn run_app(
             }
             Some(AppEvent::Tick) => {}
             None => break,
+        }
+
+        if let Some(new_addr) = app.pending_rebind.take() {
+            match TcpListener::bind(new_addr).await {
+                Ok(listener) => {
+                    cancel.cancel();
+                    *cancel = CancellationToken::new();
+
+                    let server = ProxyServer::new(
+                        new_addr,
+                        app.ui_tx.clone(),
+                        cert_cache.clone(),
+                        app.intercept_state.clone(),
+                        app.scope.clone(),
+                        app.rules.clone(),
+                        cancel.clone(),
+                    );
+                    tokio::spawn(async move {
+                        if let Err(e) = server.run(listener).await {
+                            tracing::error!("Proxy server error: {}", e);
+                        }
+                    });
+
+                    app.bind_addr = new_addr;
+                    app.status_message = Some((
+                        format!("Proxy restarted on {}", new_addr),
+                        std::time::Instant::now(),
+                    ));
+                }
+                Err(e) => {
+                    app.status_message = Some((
+                        format!("Failed to bind {}: {}", new_addr, e),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
         }
 
         if app.should_quit {

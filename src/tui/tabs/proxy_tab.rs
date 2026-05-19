@@ -27,6 +27,22 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_status_line(app: &App, frame: &mut Frame, area: Rect) {
+    if app.editing_bind_addr {
+        let line = Line::from(vec![
+            Span::raw(" Bind address: "),
+            Span::styled(&app.bind_addr_buffer, Style::default().fg(Color::White)),
+            Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
+        ]);
+        let widget = Paragraph::new(line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Proxy ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        frame.render_widget(widget, area);
+        return;
+    }
+
     let intercept_status = if app.intercept_enabled() {
         Span::styled(
             " INTERCEPT ON ",
@@ -173,7 +189,7 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
 fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
     let has_request = !app.intercept_queue.is_empty();
 
-    let actions = if app.editing_intercept {
+    let actions = if app.editing_intercept || app.editing_bind_addr {
         Line::from(vec![
             Span::styled(" Enter ", Style::default().fg(Color::Green).bold()),
             Span::raw("confirm  "),
@@ -202,6 +218,8 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
                 Span::styled(" e ", dim_key_style())
             },
             Span::raw("edit  "),
+            Span::styled(" b ", key_style()),
+            Span::raw("bind  "),
             Span::styled(" j/k ", key_style()),
             Span::raw("scroll"),
         ])

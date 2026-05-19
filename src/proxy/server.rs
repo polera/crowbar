@@ -47,8 +47,7 @@ impl ProxyServer {
         }
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(self.bind_addr).await?;
+    pub async fn run(self, listener: TcpListener) -> anyhow::Result<()> {
         info!("Proxy listening on {}", self.bind_addr);
 
         let handler = Arc::new(ProxyHandler::new(

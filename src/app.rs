@@ -86,6 +86,11 @@ pub struct App {
     pub tools_cursor_line: usize,
     pub tools_cursor_col: usize,
     pub tools_scroll: u16,
+
+    // Bind address editing
+    pub editing_bind_addr: bool,
+    pub bind_addr_buffer: String,
+    pub pending_rebind: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +190,9 @@ impl App {
             tools_cursor_line: 0,
             tools_cursor_col: 0,
             tools_scroll: 0,
+            editing_bind_addr: false,
+            bind_addr_buffer: String::new(),
+            pending_rebind: None,
         }
     }
 
@@ -220,6 +228,11 @@ impl App {
 
             if self.tools_editing {
                 self.handle_tools_editor_key(key);
+                return;
+            }
+
+            if self.editing_bind_addr {
+                self.handle_bind_addr_editor_key(key);
                 return;
             }
 
@@ -363,11 +376,52 @@ impl App {
                     self.intercept_scroll = 0;
                 }
             }
+            KeyCode::Char('b') => {
+                self.bind_addr_buffer = self.bind_addr.to_string();
+                self.editing_bind_addr = true;
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.intercept_scroll = self.intercept_scroll.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.intercept_scroll += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_bind_addr_editor_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.editing_bind_addr = false;
+                self.bind_addr_buffer.clear();
+            }
+            KeyCode::Enter => {
+                let input = self.bind_addr_buffer.trim().to_string();
+                let parsed = input
+                    .parse::<SocketAddr>()
+                    .or_else(|_| format!("127.0.0.1:{}", input).parse::<SocketAddr>());
+                match parsed {
+                    Ok(addr) => {
+                        self.pending_rebind = Some(addr);
+                        self.editing_bind_addr = false;
+                        self.bind_addr_buffer.clear();
+                    }
+                    Err(_) => {
+                        self.status_message = Some((
+                            format!("Invalid address: {}", input),
+                            std::time::Instant::now(),
+                        ));
+                        self.editing_bind_addr = false;
+                        self.bind_addr_buffer.clear();
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                self.bind_addr_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                self.bind_addr_buffer.pop();
             }
             _ => {}
         }
@@ -1279,6 +1333,7 @@ impl App {
             Line::from(vec![Span::styled("  f              ", key), Span::raw("Forward intercepted request")]),
             Line::from(vec![Span::styled("  d              ", key), Span::raw("Drop intercepted request")]),
             Line::from(vec![Span::styled("  e              ", key), Span::raw("Edit intercepted request")]),
+            Line::from(vec![Span::styled("  b              ", key), Span::raw("Change bind address")]),
             Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Scroll request")]),
             Line::raw(""),
             Line::from(Span::styled("History", section)),

@@ -24,16 +24,6 @@ impl Scope {
         self.patterns.read().unwrap().clone()
     }
 
-    pub fn add(&self, pattern: String) {
-        self.patterns.write().unwrap().push(pattern);
-    }
-
-    pub fn remove(&self, index: usize) {
-        let mut patterns = self.patterns.write().unwrap();
-        if index < patterns.len() {
-            patterns.remove(index);
-        }
-    }
 }
 
 fn match_pattern(pattern: &str, host: &str) -> bool {
