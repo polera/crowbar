@@ -557,16 +557,14 @@ impl App {
                     self.history_selected += 1;
                 }
             }
-            KeyCode::Home | KeyCode::Char('g') => {
-                if !self.history_detail_open {
+            KeyCode::Home | KeyCode::Char('g')
+                if !self.history_detail_open => {
                     self.history_selected = 0;
                 }
-            }
-            KeyCode::End | KeyCode::Char('G') => {
-                if !self.history_detail_open && entry_count > 0 {
+            KeyCode::End | KeyCode::Char('G')
+                if !self.history_detail_open && entry_count > 0 => {
                     self.history_selected = entry_count - 1;
                 }
-            }
             KeyCode::Enter => {
                 if self.history_detail_open {
                     self.history_detail_open = false;
@@ -576,22 +574,19 @@ impl App {
                     self.history_scroll = 0;
                 }
             }
-            KeyCode::Esc => {
-                if self.history_detail_open {
+            KeyCode::Esc
+                if self.history_detail_open => {
                     self.history_detail_open = false;
                     self.history_scroll = 0;
                 }
-            }
-            KeyCode::Char('r') => {
-                if entry_count > 0 {
+            KeyCode::Char('r')
+                if entry_count > 0 => {
                     self.send_to_repeater();
                 }
-            }
-            KeyCode::Char('/') => {
-                if !self.history_detail_open {
+            KeyCode::Char('/')
+                if !self.history_detail_open => {
                     self.history_filtering = true;
                 }
-            }
             KeyCode::Char('c') => {
                 if entry_count > 0
                     && let Some(entry) = filtered.get(self.history_selected) {
@@ -606,13 +601,12 @@ impl App {
                         self.export_to_file("raw", "txt", &raw);
                     }
             }
-            KeyCode::Char('h') => {
-                if !self.history_detail_open {
+            KeyCode::Char('h')
+                if !self.history_detail_open => {
                     let entries: Vec<_> = filtered.iter().map(|e| (*e).clone()).collect();
                     let har = crate::http::export::to_har(&entries);
                     self.export_to_file("har", "har", &har);
                 }
-            }
             KeyCode::Char('m') => {
                 if entry_count > 0
                     && let Some(entry) = filtered.get(self.history_selected) {
@@ -672,73 +666,63 @@ impl App {
                 rules.push(crate::rules::Rule::new(name));
                 self.rules_selected = rules.len() - 1;
             }
-            KeyCode::Char('x') => {
-                if count > 0 {
+            KeyCode::Char('x')
+                if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
                     rules.remove(self.rules_selected);
                     if self.rules_selected >= rules.len() && !rules.is_empty() {
                         self.rules_selected = rules.len() - 1;
                     }
                 }
-            }
-            KeyCode::Enter => {
-                if count > 0 {
+            KeyCode::Enter
+                if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
                     rules[self.rules_selected].enabled = !rules[self.rules_selected].enabled;
                 }
-            }
-            KeyCode::Char('t') => {
-                if count > 0 {
+            KeyCode::Char('t')
+                if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
                     rules[self.rules_selected].target = rules[self.rules_selected].target.next();
                 }
-            }
-            KeyCode::Char('s') => {
-                if count > 0 {
+            KeyCode::Char('s')
+                if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
                     rules[self.rules_selected].scope = rules[self.rules_selected].scope.next();
                 }
-            }
-            KeyCode::Char('R') => {
-                if count > 0 {
+            KeyCode::Char('R')
+                if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
                     rules[self.rules_selected].is_regex = !rules[self.rules_selected].is_regex;
                 }
-            }
-            KeyCode::Char('n') => {
-                if count > 0 {
+            KeyCode::Char('n')
+                if count > 0 => {
                     let rules = self.rules.read().unwrap();
                     self.rules_edit_buffer = rules[self.rules_selected].name.clone();
                     drop(rules);
                     self.rules_editing_field = Some(RuleField::Name);
                 }
-            }
-            KeyCode::Char('p') => {
-                if count > 0 {
+            KeyCode::Char('p')
+                if count > 0 => {
                     let rules = self.rules.read().unwrap();
                     self.rules_edit_buffer = rules[self.rules_selected].match_pattern.clone();
                     drop(rules);
                     self.rules_editing_field = Some(RuleField::Pattern);
                 }
-            }
-            KeyCode::Char('e') => {
-                if count > 0 {
+            KeyCode::Char('e')
+                if count > 0 => {
                     let rules = self.rules.read().unwrap();
                     self.rules_edit_buffer = rules[self.rules_selected].replacement.clone();
                     drop(rules);
                     self.rules_editing_field = Some(RuleField::Replacement);
                 }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.rules_selected > 0 {
+            KeyCode::Up | KeyCode::Char('k')
+                if self.rules_selected > 0 => {
                     self.rules_selected -= 1;
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if count > 0 && self.rules_selected < count - 1 {
+            KeyCode::Down | KeyCode::Char('j')
+                if count > 0 && self.rules_selected < count - 1 => {
                     self.rules_selected += 1;
                 }
-            }
             _ => {}
         }
     }
@@ -831,23 +815,20 @@ impl App {
                     self.tools_input[self.tools_cursor_line].push_str(&current);
                 }
             }
-            (_, KeyCode::Up) => {
-                if self.tools_cursor_line > 0 {
+            (_, KeyCode::Up)
+                if self.tools_cursor_line > 0 => {
                     self.tools_cursor_line -= 1;
                     self.tools_cursor_col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
                 }
-            }
-            (_, KeyCode::Down) => {
-                if self.tools_cursor_line + 1 < self.tools_input.len() {
+            (_, KeyCode::Down)
+                if self.tools_cursor_line + 1 < self.tools_input.len() => {
                     self.tools_cursor_line += 1;
                     self.tools_cursor_col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
                 }
-            }
-            (_, KeyCode::Left) => {
-                if self.tools_cursor_col > 0 {
+            (_, KeyCode::Left)
+                if self.tools_cursor_col > 0 => {
                     self.tools_cursor_col -= 1;
                 }
-            }
             (_, KeyCode::Right) => {
                 let len = self.tools_input[self.tools_cursor_line].len();
                 if self.tools_cursor_col < len {
@@ -923,18 +904,16 @@ impl App {
                     self.repeater_send();
                 }
             }
-            (KeyModifiers::NONE, KeyCode::Char('e')) => {
-                if !self.repeater_lines.is_empty() {
+            (KeyModifiers::NONE, KeyCode::Char('e'))
+                if !self.repeater_lines.is_empty() => {
                     self.repeater_editing = true;
                     self.repeater_cursor_line = 0;
                     self.repeater_cursor_col = 0;
                 }
-            }
-            (KeyModifiers::NONE, KeyCode::Char('d')) => {
-                if !self.macro_show && self.repeater_original.is_some() {
+            (KeyModifiers::NONE, KeyCode::Char('d'))
+                if !self.macro_show && self.repeater_original.is_some() => {
                     self.repeater_show_diff = !self.repeater_show_diff;
                 }
-            }
             (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
                 self.macro_show = !self.macro_show;
             }
@@ -962,20 +941,18 @@ impl App {
             (KeyModifiers::SHIFT, KeyCode::Char('K')) => {
                 self.repeater_resp_scroll = self.repeater_resp_scroll.saturating_sub(1);
             }
-            (KeyModifiers::NONE, KeyCode::Char('x')) => {
-                if self.macro_show && !self.macro_steps.is_empty() && !self.macro_running {
+            (KeyModifiers::NONE, KeyCode::Char('x'))
+                if self.macro_show && !self.macro_steps.is_empty() && !self.macro_running => {
                     self.macro_steps.remove(self.macro_selected);
                     if self.macro_selected >= self.macro_steps.len() && !self.macro_steps.is_empty() {
                         self.macro_selected = self.macro_steps.len() - 1;
                     }
                 }
-            }
-            (KeyModifiers::NONE, KeyCode::Char('X')) | (KeyModifiers::SHIFT, KeyCode::Char('X')) => {
-                if self.macro_show && !self.macro_running {
+            (KeyModifiers::NONE, KeyCode::Char('X')) | (KeyModifiers::SHIFT, KeyCode::Char('X'))
+                if self.macro_show && !self.macro_running => {
                     self.macro_steps.clear();
                     self.macro_selected = 0;
                 }
-            }
             _ => {}
         }
     }
@@ -1056,23 +1033,20 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Up => {
-                if *cursor_line > 0 {
+            KeyCode::Up
+                if *cursor_line > 0 => {
                     *cursor_line -= 1;
                     *cursor_col = (*cursor_col).min(lines[*cursor_line].len());
                 }
-            }
-            KeyCode::Down => {
-                if *cursor_line + 1 < lines.len() {
+            KeyCode::Down
+                if *cursor_line + 1 < lines.len() => {
                     *cursor_line += 1;
                     *cursor_col = (*cursor_col).min(lines[*cursor_line].len());
                 }
-            }
-            KeyCode::Left => {
-                if *cursor_col > 0 {
+            KeyCode::Left
+                if *cursor_col > 0 => {
                     *cursor_col -= 1;
                 }
-            }
             KeyCode::Right => {
                 let line_len = lines[*cursor_line].len();
                 if *cursor_col < line_len {
@@ -1085,13 +1059,12 @@ impl App {
             KeyCode::End => {
                 *cursor_col = lines[*cursor_line].len();
             }
-            KeyCode::Char(c) => {
-                if *cursor_line < lines.len() {
+            KeyCode::Char(c)
+                if *cursor_line < lines.len() => {
                     let col = (*cursor_col).min(lines[*cursor_line].len());
                     lines[*cursor_line].insert(col, c);
                     *cursor_col = col + 1;
                 }
-            }
             KeyCode::Backspace => {
                 if *cursor_col > 0 && *cursor_line < lines.len() {
                     *cursor_col -= 1;
@@ -1103,8 +1076,8 @@ impl App {
                     lines[*cursor_line].push_str(&current);
                 }
             }
-            KeyCode::Delete => {
-                if *cursor_line < lines.len() {
+            KeyCode::Delete
+                if *cursor_line < lines.len() => {
                     let line_len = lines[*cursor_line].len();
                     if *cursor_col < line_len {
                         lines[*cursor_line].remove(*cursor_col);
@@ -1113,7 +1086,6 @@ impl App {
                         lines[*cursor_line].push_str(&next);
                     }
                 }
-            }
             _ => {}
         }
     }
