@@ -37,6 +37,22 @@ pub async fn send_request(
     }
 }
 
+pub async fn send_raw_request(request: RequestData) -> Result<ResponseData, String> {
+    let start = Instant::now();
+    let result = if request.is_tls {
+        send_https(&request).await
+    } else {
+        send_http(&request).await
+    };
+    match result {
+        Ok(mut resp) => {
+            resp.duration = start.elapsed();
+            Ok(resp)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 async fn send_http(request: &RequestData) -> anyhow::Result<ResponseData> {
     let host = &request.host;
     let port = extract_port(&request.uri).unwrap_or(80);

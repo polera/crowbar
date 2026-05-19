@@ -4,6 +4,8 @@ mod config;
 mod event;
 mod http;
 mod proxy;
+mod rules;
+mod scanning;
 mod tls;
 mod tui;
 
@@ -19,7 +21,9 @@ use crate::channel::ProxyToUi;
 use crate::config::Config;
 use crate::event::{AppEvent, EventLoop};
 use crate::proxy::intercept::InterceptState;
+use crate::proxy::scope::Scope;
 use crate::proxy::server::ProxyServer;
+use crate::rules::SharedRules;
 use crate::tls::ca::CertificateAuthority;
 use crate::tls::cert_cache::CertCache;
 use crate::tui::terminal;
@@ -28,6 +32,9 @@ use crate::tui::terminal;
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
 
+    if let Some(cmd) = config.command {
+        return handle_command(cmd);
+    }
 
     let log_dir = dirs::home_dir().unwrap_or_default().join(".crowbar");
     std::fs::create_dir_all(&log_dir)?;
@@ -48,6 +55,9 @@ async fn main() -> anyhow::Result<()> {
     let ca = CertificateAuthority::load_or_generate()?;
     let cert_cache = Arc::new(CertCache::new(Arc::new(ca)));
     let intercept = Arc::new(InterceptState::new(config.intercept));
+    let scope = Arc::new(Scope::new(config.scope));
+
+    let rules: SharedRules = Arc::new(std::sync::RwLock::new(Vec::new()));
 
     let cancel = CancellationToken::new();
 
@@ -59,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
         ui_tx,
         cert_cache,
         intercept.clone(),
+        scope.clone(),
+        rules.clone(),
         cancel.clone(),
     );
     tokio::spawn(async move {
@@ -68,7 +80,12 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let mut tui = terminal::init()?;
-    let mut app = App::new(config.bind, intercept.clone(), app_tx);
+    let mut app = App::new(config.bind, intercept.clone(), scope, rules, app_tx);
+
+    if let Some(path) = config.load {
+        app.load_session(&path);
+    }
+
     let mut events = EventLoop::new(ui_rx);
 
     let result = run_app(&mut tui, &mut app, &mut events).await;
@@ -111,4 +128,57 @@ async fn run_app(
     }
 
     Ok(())
+}
+
+fn handle_command(cmd: crate::config::Command) -> anyhow::Result<()> {
+    match cmd {
+        crate::config::Command::CaExport { output } => {
+            let ca_dir = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?
+                .join(".crowbar");
+            let cert_path = ca_dir.join("ca.pem");
+
+            if !cert_path.exists() {
+                eprintln!("No CA certificate found. Run crowbar once to generate it.");
+                std::process::exit(1);
+            }
+
+            let pem = std::fs::read_to_string(&cert_path)?;
+
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &pem)?;
+                    eprintln!("CA certificate written to {}", path.display());
+                    eprintln!();
+                    eprintln!("To trust this certificate:");
+                    eprintln!("  macOS:   security add-trusted-cert -d -r trustRoot -k ~/Library/Keychains/login.keychain-db {}", path.display());
+                    eprintln!("  Linux:   sudo cp {} /usr/local/share/ca-certificates/crowbar.crt && sudo update-ca-certificates", path.display());
+                    eprintln!("  Firefox: Settings > Privacy & Security > Certificates > Import");
+                }
+                None => {
+                    print!("{}", pem);
+                }
+            }
+            Ok(())
+        }
+        crate::config::Command::Import { input, name } => {
+            let entries = crate::http::import::load_file(&input)?;
+            let session_name = name.unwrap_or_else(|| {
+                input
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
+            let path = crate::http::session::save(&entries, &session_name)?;
+            eprintln!(
+                "Imported {} entries from {} -> {}",
+                entries.len(),
+                input.display(),
+                path.display()
+            );
+            eprintln!("Load with: crowbar --load {}", path.display());
+            Ok(())
+        }
+    }
 }

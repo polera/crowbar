@@ -13,12 +13,17 @@ use tokio::sync::mpsc;
 use crate::channel::ProxyToUi;
 use crate::http::codec;
 use crate::http::models::{EntryState, RequestData, RequestId, ResponseData};
+use crate::http::sequence::{SequenceStep, StepState};
 use crate::http::store::InMemoryStore;
 use crate::proxy::intercept::{InterceptDecision, InterceptState};
 use crate::proxy::repeater;
+use crate::proxy::scope::Scope;
+use crate::rules::SharedRules;
 use crate::tui::tabs::history_tab;
 use crate::tui::tabs::proxy_tab;
 use crate::tui::tabs::repeater_tab;
+use crate::tui::tabs::rules_tab;
+use crate::tui::tabs::tools_tab;
 use crate::tui::tabs::Tab;
 
 pub struct App {
@@ -27,12 +32,15 @@ pub struct App {
     pub store: InMemoryStore,
     pub bind_addr: SocketAddr,
     pub intercept_state: Arc<InterceptState>,
+    pub scope: Arc<Scope>,
     pub ui_tx: mpsc::UnboundedSender<ProxyToUi>,
 
     // History tab state
     pub history_selected: usize,
     pub history_detail_open: bool,
     pub history_scroll: u16,
+    pub history_filter: String,
+    pub history_filtering: bool,
 
     // Proxy/Intercept tab state
     pub intercept_queue: VecDeque<RequestData>,
@@ -53,14 +61,81 @@ pub struct App {
     pub repeater_cursor_col: usize,
     pub repeater_req_scroll: u16,
     pub repeater_resp_scroll: u16,
+    pub repeater_show_diff: bool,
+
+    // Macro/sequence state
+    pub macro_steps: Vec<SequenceStep>,
+    pub macro_selected: usize,
+    pub macro_running: bool,
+    pub macro_show: bool,
+    pub macro_current_step: usize,
 
     pub show_help: bool,
+    pub status_message: Option<(String, std::time::Instant)>,
+
+    // Rules tab state
+    pub rules: SharedRules,
+    pub rules_selected: usize,
+    pub rules_editing_field: Option<RuleField>,
+    pub rules_edit_buffer: String,
+
+    // Tools tab state
+    pub tools_mode: ToolsMode,
+    pub tools_input: Vec<String>,
+    pub tools_editing: bool,
+    pub tools_cursor_line: usize,
+    pub tools_cursor_col: usize,
+    pub tools_scroll: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolsMode {
+    UrlEncode,
+    UrlDecode,
+    Base64Encode,
+    Base64Decode,
+    HexEncode,
+    HexDecode,
+}
+
+impl ToolsMode {
+    pub const ALL: [ToolsMode; 6] = [
+        ToolsMode::UrlEncode,
+        ToolsMode::UrlDecode,
+        ToolsMode::Base64Encode,
+        ToolsMode::Base64Decode,
+        ToolsMode::HexEncode,
+        ToolsMode::HexDecode,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolsMode::UrlEncode => "URL Encode",
+            ToolsMode::UrlDecode => "URL Decode",
+            ToolsMode::Base64Encode => "Base64 Encode",
+            ToolsMode::Base64Decode => "Base64 Decode",
+            ToolsMode::HexEncode => "Hex Encode",
+            ToolsMode::HexDecode => "Hex Decode",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
 }
 
 impl App {
     pub fn new(
         bind_addr: SocketAddr,
         intercept_state: Arc<InterceptState>,
+        scope: Arc<Scope>,
+        rules: SharedRules,
         ui_tx: mpsc::UnboundedSender<ProxyToUi>,
     ) -> Self {
         Self {
@@ -69,10 +144,13 @@ impl App {
             store: InMemoryStore::new(),
             bind_addr,
             intercept_state,
+            scope,
             ui_tx,
             history_selected: 0,
             history_detail_open: false,
             history_scroll: 0,
+            history_filter: String::new(),
+            history_filtering: false,
             intercept_queue: VecDeque::new(),
             intercept_scroll: 0,
             editing_intercept: false,
@@ -89,7 +167,24 @@ impl App {
             repeater_cursor_col: 0,
             repeater_req_scroll: 0,
             repeater_resp_scroll: 0,
+            repeater_show_diff: false,
+            macro_steps: Vec::new(),
+            macro_selected: 0,
+            macro_running: false,
+            macro_show: false,
+            macro_current_step: 0,
             show_help: false,
+            status_message: None,
+            rules,
+            rules_selected: 0,
+            rules_editing_field: None,
+            rules_edit_buffer: String::new(),
+            tools_mode: ToolsMode::UrlEncode,
+            tools_input: vec![String::new()],
+            tools_editing: false,
+            tools_cursor_line: 0,
+            tools_cursor_col: 0,
+            tools_scroll: 0,
         }
     }
 
@@ -118,6 +213,21 @@ impl App {
                 return;
             }
 
+            if self.history_filtering {
+                self.handle_filter_key(key);
+                return;
+            }
+
+            if self.tools_editing {
+                self.handle_tools_editor_key(key);
+                return;
+            }
+
+            if self.rules_editing_field.is_some() {
+                self.handle_rules_editor_key(key);
+                return;
+            }
+
             if self.handle_global_key(key) {
                 return;
             }
@@ -125,6 +235,8 @@ impl App {
                 Tab::History => self.handle_history_key(key),
                 Tab::Proxy => self.handle_proxy_key(key),
                 Tab::Repeater => self.handle_repeater_key(key),
+                Tab::Rules => self.handle_rules_key(key),
+                Tab::Tools => self.handle_tools_key(key),
             }
         }
     }
@@ -162,11 +274,59 @@ impl App {
                 self.active_tab = Tab::Repeater;
                 true
             }
+            (_, KeyCode::Char('4')) => {
+                self.active_tab = Tab::Rules;
+                true
+            }
+            (_, KeyCode::Char('5')) => {
+                self.active_tab = Tab::Tools;
+                true
+            }
             (KeyModifiers::NONE, KeyCode::Char('?')) => {
                 self.show_help = true;
                 true
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
+                self.save_session();
+                true
+            }
             _ => false,
+        }
+    }
+
+    fn save_session(&mut self) {
+        let name = crate::http::session::auto_save_name();
+        match crate::http::session::save(self.store.entries(), &name) {
+            Ok(path) => {
+                self.status_message = Some((
+                    format!("Saved to {}", path.display()),
+                    std::time::Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.status_message = Some((
+                    format!("Save failed: {}", e),
+                    std::time::Instant::now(),
+                ));
+            }
+        }
+    }
+
+    pub fn load_session(&mut self, path: &std::path::Path) {
+        match crate::http::import::load_file(path) {
+            Ok(entries) => {
+                self.store.load_entries(entries);
+                self.status_message = Some((
+                    format!("Loaded {} entries", self.store.len()),
+                    std::time::Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.status_message = Some((
+                    format!("Load failed: {}", e),
+                    std::time::Instant::now(),
+                ));
+            }
         }
     }
 
@@ -214,7 +374,8 @@ impl App {
     }
 
     fn handle_history_key(&mut self, key: KeyEvent) {
-        let entry_count = self.store.len();
+        let filtered = self.store.filtered_entries(&self.history_filter);
+        let entry_count = filtered.len();
 
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -261,6 +422,332 @@ impl App {
                     self.send_to_repeater();
                 }
             }
+            KeyCode::Char('/') => {
+                if !self.history_detail_open {
+                    self.history_filtering = true;
+                }
+            }
+            KeyCode::Char('c') => {
+                if entry_count > 0 {
+                    if let Some(entry) = filtered.get(self.history_selected) {
+                        let curl = crate::http::export::to_curl(entry);
+                        self.export_to_file("curl", "sh", &curl);
+                    }
+                }
+            }
+            KeyCode::Char('w') => {
+                if entry_count > 0 {
+                    if let Some(entry) = filtered.get(self.history_selected) {
+                        let raw = crate::http::export::to_raw(entry);
+                        self.export_to_file("raw", "txt", &raw);
+                    }
+                }
+            }
+            KeyCode::Char('h') => {
+                if !self.history_detail_open {
+                    let entries: Vec<_> = filtered.iter().map(|e| (*e).clone()).collect();
+                    let har = crate::http::export::to_har(&entries);
+                    self.export_to_file("har", "har", &har);
+                }
+            }
+            KeyCode::Char('m') => {
+                if entry_count > 0 {
+                    if let Some(entry) = filtered.get(self.history_selected) {
+                        self.macro_steps.push(SequenceStep::new(entry.request.clone()));
+                        self.status_message = Some((
+                            format!("Added to macro ({} steps)", self.macro_steps.len()),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn export_to_file(&mut self, prefix: &str, ext: &str, content: &str) {
+        let dir = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".crowbar")
+            .join("exports");
+        if std::fs::create_dir_all(&dir).is_err() {
+            self.status_message = Some((
+                "Failed to create exports directory".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let path = dir.join(format!("{}-{}.{}", prefix, ts, ext));
+        match std::fs::write(&path, content) {
+            Ok(_) => {
+                self.status_message = Some((
+                    format!("Exported to {}", path.display()),
+                    std::time::Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.status_message = Some((
+                    format!("Export failed: {}", e),
+                    std::time::Instant::now(),
+                ));
+            }
+        }
+    }
+
+    fn handle_rules_key(&mut self, key: KeyEvent) {
+        let rules = self.rules.read().unwrap();
+        let count = rules.len();
+        drop(rules);
+
+        match key.code {
+            KeyCode::Char('a') => {
+                let mut rules = self.rules.write().unwrap();
+                let name = format!("Rule {}", rules.len() + 1);
+                rules.push(crate::rules::Rule::new(name));
+                self.rules_selected = rules.len() - 1;
+            }
+            KeyCode::Char('x') => {
+                if count > 0 {
+                    let mut rules = self.rules.write().unwrap();
+                    rules.remove(self.rules_selected);
+                    if self.rules_selected >= rules.len() && !rules.is_empty() {
+                        self.rules_selected = rules.len() - 1;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if count > 0 {
+                    let mut rules = self.rules.write().unwrap();
+                    rules[self.rules_selected].enabled = !rules[self.rules_selected].enabled;
+                }
+            }
+            KeyCode::Char('t') => {
+                if count > 0 {
+                    let mut rules = self.rules.write().unwrap();
+                    rules[self.rules_selected].target = rules[self.rules_selected].target.next();
+                }
+            }
+            KeyCode::Char('s') => {
+                if count > 0 {
+                    let mut rules = self.rules.write().unwrap();
+                    rules[self.rules_selected].scope = rules[self.rules_selected].scope.next();
+                }
+            }
+            KeyCode::Char('R') => {
+                if count > 0 {
+                    let mut rules = self.rules.write().unwrap();
+                    rules[self.rules_selected].is_regex = !rules[self.rules_selected].is_regex;
+                }
+            }
+            KeyCode::Char('n') => {
+                if count > 0 {
+                    let rules = self.rules.read().unwrap();
+                    self.rules_edit_buffer = rules[self.rules_selected].name.clone();
+                    drop(rules);
+                    self.rules_editing_field = Some(RuleField::Name);
+                }
+            }
+            KeyCode::Char('p') => {
+                if count > 0 {
+                    let rules = self.rules.read().unwrap();
+                    self.rules_edit_buffer = rules[self.rules_selected].match_pattern.clone();
+                    drop(rules);
+                    self.rules_editing_field = Some(RuleField::Pattern);
+                }
+            }
+            KeyCode::Char('e') => {
+                if count > 0 {
+                    let rules = self.rules.read().unwrap();
+                    self.rules_edit_buffer = rules[self.rules_selected].replacement.clone();
+                    drop(rules);
+                    self.rules_editing_field = Some(RuleField::Replacement);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.rules_selected > 0 {
+                    self.rules_selected -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if count > 0 && self.rules_selected < count - 1 {
+                    self.rules_selected += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_rules_editor_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.rules_editing_field = None;
+                self.rules_edit_buffer.clear();
+            }
+            KeyCode::Enter => {
+                if let Some(field) = self.rules_editing_field {
+                    let mut rules = self.rules.write().unwrap();
+                    if self.rules_selected < rules.len() {
+                        match field {
+                            RuleField::Name => {
+                                rules[self.rules_selected].name = self.rules_edit_buffer.clone();
+                            }
+                            RuleField::Pattern => {
+                                rules[self.rules_selected].match_pattern = self.rules_edit_buffer.clone();
+                            }
+                            RuleField::Replacement => {
+                                rules[self.rules_selected].replacement = self.rules_edit_buffer.clone();
+                            }
+                        }
+                    }
+                }
+                self.rules_editing_field = None;
+                self.rules_edit_buffer.clear();
+            }
+            KeyCode::Char(c) => {
+                self.rules_edit_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                self.rules_edit_buffer.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_tools_key(&mut self, key: KeyEvent) {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Char('e')) => {
+                self.tools_editing = true;
+                self.tools_cursor_line = 0;
+                self.tools_cursor_col = 0;
+            }
+            (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l')) => {
+                self.tools_mode = self.tools_mode.next();
+            }
+            (KeyModifiers::NONE, KeyCode::Left | KeyCode::Char('h')) => {
+                self.tools_mode = self.tools_mode.prev();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
+                self.tools_scroll += 1;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
+                self.tools_scroll = self.tools_scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_tools_editor_key(&mut self, key: KeyEvent) {
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Esc) => {
+                self.tools_editing = false;
+            }
+            (_, KeyCode::Enter) => {
+                let col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
+                let rest = self.tools_input[self.tools_cursor_line][col..].to_string();
+                self.tools_input[self.tools_cursor_line].truncate(col);
+                self.tools_cursor_line += 1;
+                self.tools_input.insert(self.tools_cursor_line, rest);
+                self.tools_cursor_col = 0;
+            }
+            (_, KeyCode::Char(c)) => {
+                let col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
+                self.tools_input[self.tools_cursor_line].insert(col, c);
+                self.tools_cursor_col = col + 1;
+            }
+            (_, KeyCode::Backspace) => {
+                if self.tools_cursor_col > 0 {
+                    self.tools_cursor_col -= 1;
+                    self.tools_input[self.tools_cursor_line].remove(self.tools_cursor_col);
+                } else if self.tools_cursor_line > 0 {
+                    let current = self.tools_input.remove(self.tools_cursor_line);
+                    self.tools_cursor_line -= 1;
+                    self.tools_cursor_col = self.tools_input[self.tools_cursor_line].len();
+                    self.tools_input[self.tools_cursor_line].push_str(&current);
+                }
+            }
+            (_, KeyCode::Up) => {
+                if self.tools_cursor_line > 0 {
+                    self.tools_cursor_line -= 1;
+                    self.tools_cursor_col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
+                }
+            }
+            (_, KeyCode::Down) => {
+                if self.tools_cursor_line + 1 < self.tools_input.len() {
+                    self.tools_cursor_line += 1;
+                    self.tools_cursor_col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
+                }
+            }
+            (_, KeyCode::Left) => {
+                if self.tools_cursor_col > 0 {
+                    self.tools_cursor_col -= 1;
+                }
+            }
+            (_, KeyCode::Right) => {
+                let len = self.tools_input[self.tools_cursor_line].len();
+                if self.tools_cursor_col < len {
+                    self.tools_cursor_col += 1;
+                }
+            }
+            (_, KeyCode::Home) => {
+                self.tools_cursor_col = 0;
+            }
+            (_, KeyCode::End) => {
+                self.tools_cursor_col = self.tools_input[self.tools_cursor_line].len();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn tools_input_text(&self) -> String {
+        self.tools_input.join("\n")
+    }
+
+    pub fn tools_output(&self) -> String {
+        use base64::Engine;
+        let input = self.tools_input_text();
+        match self.tools_mode {
+            ToolsMode::UrlEncode => url_encode(&input),
+            ToolsMode::UrlDecode => url_decode(&input),
+            ToolsMode::Base64Encode => base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
+            ToolsMode::Base64Decode => {
+                match base64::engine::general_purpose::STANDARD.decode(input.trim()) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Err(e) => format!("Error: {}", e),
+                }
+            }
+            ToolsMode::HexEncode => hex_encode(input.as_bytes()),
+            ToolsMode::HexDecode => {
+                match hex_decode(input.trim()) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Err(e) => format!("Error: {}", e),
+                }
+            }
+        }
+    }
+
+    fn handle_filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.history_filtering = false;
+                self.history_filter.clear();
+                self.history_selected = 0;
+            }
+            KeyCode::Enter => {
+                self.history_filtering = false;
+                self.history_selected = 0;
+            }
+            KeyCode::Backspace => {
+                self.history_filter.pop();
+                self.history_selected = 0;
+            }
+            KeyCode::Char(c) => {
+                self.history_filter.push(c);
+                self.history_selected = 0;
+            }
             _ => {}
         }
     }
@@ -268,7 +755,11 @@ impl App {
     fn handle_repeater_key(&mut self, key: KeyEvent) {
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Enter) => {
-                self.repeater_send();
+                if self.macro_show {
+                    self.macro_run();
+                } else {
+                    self.repeater_send();
+                }
             }
             (KeyModifiers::NONE, KeyCode::Char('e')) => {
                 if !self.repeater_lines.is_empty() {
@@ -277,17 +768,51 @@ impl App {
                     self.repeater_cursor_col = 0;
                 }
             }
+            (KeyModifiers::NONE, KeyCode::Char('d')) => {
+                if !self.macro_show && self.repeater_original.is_some() {
+                    self.repeater_show_diff = !self.repeater_show_diff;
+                }
+            }
+            (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
+                self.macro_show = !self.macro_show;
+            }
             (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
-                self.repeater_req_scroll += 1;
+                if self.macro_show {
+                    if !self.macro_steps.is_empty() && self.macro_selected < self.macro_steps.len() - 1 {
+                        self.macro_selected += 1;
+                    }
+                } else {
+                    self.repeater_req_scroll += 1;
+                }
             }
             (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
-                self.repeater_req_scroll = self.repeater_req_scroll.saturating_sub(1);
+                if self.macro_show {
+                    if self.macro_selected > 0 {
+                        self.macro_selected -= 1;
+                    }
+                } else {
+                    self.repeater_req_scroll = self.repeater_req_scroll.saturating_sub(1);
+                }
             }
             (KeyModifiers::SHIFT, KeyCode::Char('J')) => {
                 self.repeater_resp_scroll += 1;
             }
             (KeyModifiers::SHIFT, KeyCode::Char('K')) => {
                 self.repeater_resp_scroll = self.repeater_resp_scroll.saturating_sub(1);
+            }
+            (KeyModifiers::NONE, KeyCode::Char('x')) => {
+                if self.macro_show && !self.macro_steps.is_empty() && !self.macro_running {
+                    self.macro_steps.remove(self.macro_selected);
+                    if self.macro_selected >= self.macro_steps.len() && !self.macro_steps.is_empty() {
+                        self.macro_selected = self.macro_steps.len() - 1;
+                    }
+                }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('X')) | (KeyModifiers::SHIFT, KeyCode::Char('X')) => {
+                if self.macro_show && !self.macro_running {
+                    self.macro_steps.clear();
+                    self.macro_selected = 0;
+                }
             }
             _ => {}
         }
@@ -432,8 +957,8 @@ impl App {
     }
 
     fn send_to_repeater(&mut self) {
-        let entries = self.store.entries();
-        if let Some(entry) = entries.get(self.history_selected) {
+        let filtered = self.store.filtered_entries(&self.history_filter);
+        if let Some(entry) = filtered.get(self.history_selected) {
             let req = &entry.request;
             self.repeater_lines = codec::request_to_lines(req);
             self.repeater_original = Some(req.clone());
@@ -479,6 +1004,50 @@ impl App {
         });
     }
 
+    fn macro_run(&mut self) {
+        if self.macro_steps.is_empty() || self.macro_running {
+            return;
+        }
+
+        for step in &mut self.macro_steps {
+            step.state = StepState::Pending;
+            step.response = None;
+            step.error = None;
+        }
+
+        self.macro_running = true;
+        self.macro_current_step = 0;
+        self.macro_send_next();
+    }
+
+    fn macro_send_next(&mut self) {
+        if self.macro_current_step >= self.macro_steps.len() {
+            self.macro_running = false;
+            self.status_message = Some((
+                format!("Macro complete ({} steps)", self.macro_steps.len()),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+
+        self.macro_steps[self.macro_current_step].state = StepState::Running;
+        let request = self.macro_steps[self.macro_current_step].request.clone();
+        let step_idx = self.macro_current_step;
+        let ui_tx = self.ui_tx.clone();
+
+        tokio::spawn(async move {
+            let ui_tx_inner = ui_tx.clone();
+            match repeater::send_raw_request(request).await {
+                Ok(resp) => {
+                    let _ = ui_tx_inner.send(ProxyToUi::MacroResponse(step_idx, resp));
+                }
+                Err(e) => {
+                    let _ = ui_tx_inner.send(ProxyToUi::MacroError(step_idx, e));
+                }
+            }
+        });
+    }
+
     pub fn handle_proxy_message(&mut self, msg: ProxyToUi) {
         match msg {
             ProxyToUi::RequestCaptured(req) => {
@@ -488,7 +1057,15 @@ impl App {
                 }
             }
             ProxyToUi::ResponseReceived(id, resp) => {
-                self.store.update_response(id, resp);
+                if let Some(entry) = self.store.entries().iter().find(|e| e.request.id == id) {
+                    let findings = crate::scanning::scan_response(&entry.request, &resp);
+                    self.store.update_response(id, resp);
+                    if !findings.is_empty() {
+                        self.store.set_findings(id, findings);
+                    }
+                } else {
+                    self.store.update_response(id, resp);
+                }
             }
             ProxyToUi::RequestError(id, err) => {
                 self.store.mark_error(id, err);
@@ -504,6 +1081,28 @@ impl App {
             ProxyToUi::RepeaterError(err) => {
                 self.repeater_pending = false;
                 self.repeater_error = Some(err);
+            }
+            ProxyToUi::WebSocketFrame(id, msg) => {
+                self.store.push_ws_message(id, msg);
+            }
+            ProxyToUi::MacroResponse(step_idx, resp) => {
+                if step_idx < self.macro_steps.len() {
+                    self.macro_steps[step_idx].response = Some(resp);
+                    self.macro_steps[step_idx].state = StepState::Complete;
+                    self.macro_current_step = step_idx + 1;
+                    self.macro_send_next();
+                }
+            }
+            ProxyToUi::MacroError(step_idx, err) => {
+                if step_idx < self.macro_steps.len() {
+                    self.macro_steps[step_idx].error = Some(err);
+                    self.macro_steps[step_idx].state = StepState::Error;
+                    self.macro_running = false;
+                    self.status_message = Some((
+                        format!("Macro stopped at step {} (error)", step_idx + 1),
+                        std::time::Instant::now(),
+                    ));
+                }
             }
         }
     }
@@ -572,10 +1171,23 @@ impl App {
             Tab::History => history_tab::render(self, frame, area),
             Tab::Proxy => proxy_tab::render(self, frame, area),
             Tab::Repeater => repeater_tab::render(self, frame, area),
+            Tab::Rules => rules_tab::render(self, frame, area),
+            Tab::Tools => tools_tab::render(self, frame, area),
         }
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
+        if let Some((msg, when)) = &self.status_message {
+            if when.elapsed() < std::time::Duration::from_secs(3) {
+                let line = Line::from(Span::styled(
+                    format!(" {} ", msg),
+                    Style::default().fg(Color::Yellow),
+                ));
+                frame.render_widget(Paragraph::new(line), area);
+                return;
+            }
+        }
+
         let total = self.store.len();
         let complete = self
             .store
@@ -602,10 +1214,21 @@ impl App {
             )
         };
 
+        let scope_patterns = self.scope.patterns();
+        let scope_span = if scope_patterns.is_empty() {
+            Span::styled(" ALL ", Style::default().fg(Color::DarkGray))
+        } else {
+            Span::styled(
+                format!(" SCOPE:{} ", scope_patterns.join(",")),
+                Style::default().fg(Color::Cyan),
+            )
+        };
+
         let status = Line::from(vec![
             intercept_span,
             Span::raw(format!(" {} ", self.bind_addr)),
-            Span::raw(" | "),
+            scope_span,
+            Span::raw("| "),
             Span::styled(
                 format!("{} requests", total),
                 Style::default().fg(Color::Cyan),
@@ -634,7 +1257,7 @@ impl App {
     fn render_help_overlay(&self, frame: &mut Frame) {
         let area = frame.area();
         let width = 52.min(area.width.saturating_sub(4));
-        let height = 26.min(area.height.saturating_sub(4));
+        let height = 30.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(width)) / 2;
         let y = (area.height.saturating_sub(height)) / 2;
         let popup = Rect::new(x, y, width, height);
@@ -646,8 +1269,9 @@ impl App {
         let lines = vec![
             Line::from(Span::styled("Global", section)),
             Line::from(vec![Span::styled("  Tab/Shift+Tab  ", key), Span::raw("Cycle tabs")]),
-            Line::from(vec![Span::styled("  1/2/3          ", key), Span::raw("Proxy / History / Repeater")]),
+            Line::from(vec![Span::styled("  1-5            ", key), Span::raw("Proxy/History/Repeater/Rules/Tools")]),
             Line::from(vec![Span::styled("  ?              ", key), Span::raw("Toggle this help")]),
+            Line::from(vec![Span::styled("  Ctrl+S         ", key), Span::raw("Save session")]),
             Line::from(vec![Span::styled("  q / Ctrl+C     ", key), Span::raw("Quit")]),
             Line::raw(""),
             Line::from(Span::styled("Proxy (Intercept)", section)),
@@ -660,14 +1284,28 @@ impl App {
             Line::from(Span::styled("History", section)),
             Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Navigate / scroll")]),
             Line::from(vec![Span::styled("  g/G            ", key), Span::raw("Jump to first / last")]),
+            Line::from(vec![Span::styled("  /              ", key), Span::raw("Filter by host, path, method, status")]),
             Line::from(vec![Span::styled("  Enter          ", key), Span::raw("Toggle detail view")]),
             Line::from(vec![Span::styled("  r              ", key), Span::raw("Send to repeater")]),
+            Line::from(vec![Span::styled("  m              ", key), Span::raw("Add to macro sequence")]),
+            Line::from(vec![Span::styled("  c              ", key), Span::raw("Export as curl")]),
+            Line::from(vec![Span::styled("  w              ", key), Span::raw("Export as raw HTTP")]),
+            Line::from(vec![Span::styled("  h              ", key), Span::raw("Export all as HAR")]),
             Line::raw(""),
             Line::from(Span::styled("Repeater", section)),
             Line::from(vec![Span::styled("  Ctrl+Enter     ", key), Span::raw("Send request")]),
             Line::from(vec![Span::styled("  e              ", key), Span::raw("Edit request")]),
+            Line::from(vec![Span::styled("  d              ", key), Span::raw("Toggle diff view")]),
+            Line::from(vec![Span::styled("  M              ", key), Span::raw("Toggle macro view")]),
             Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Scroll request")]),
             Line::from(vec![Span::styled("  J/K            ", key), Span::raw("Scroll response")]),
+            Line::raw(""),
+            Line::from(Span::styled("Rules", section)),
+            Line::from(vec![Span::styled("  a              ", key), Span::raw("Add rule")]),
+            Line::from(vec![Span::styled("  x              ", key), Span::raw("Delete rule")]),
+            Line::from(vec![Span::styled("  Enter          ", key), Span::raw("Toggle enabled")]),
+            Line::from(vec![Span::styled("  n/p/e          ", key), Span::raw("Edit name / pattern / replacement")]),
+            Line::from(vec![Span::styled("  t/s/R          ", key), Span::raw("Cycle target / scope / regex")]),
             Line::raw(""),
             Line::from(Span::styled("Press any key to close", dim)),
         ];
@@ -688,4 +1326,69 @@ impl App {
 enum EditorTarget {
     Intercept,
     Repeater,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleField {
+    Name,
+    Pattern,
+    Replacement,
+}
+
+fn url_encode(input: &str) -> String {
+    let mut result = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            _ => {
+                result.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    result
+}
+
+fn url_decode(input: &str) -> String {
+    let mut result = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(
+                &input[i + 1..i + 3],
+                16,
+            ) {
+                result.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            result.push(b' ');
+        } else {
+            result.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).to_string()
+}
+
+fn hex_encode(input: &[u8]) -> String {
+    input.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn hex_decode(input: &str) -> Result<Vec<u8>, String> {
+    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.len() % 2 != 0 {
+        return Err("Odd number of hex characters".into());
+    }
+    (0..cleaned.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&cleaned[i..i + 2], 16)
+                .map_err(|e| format!("Invalid hex at position {}: {}", i, e))
+        })
+        .collect()
 }

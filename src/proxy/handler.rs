@@ -15,13 +15,17 @@ use tracing::{debug, warn};
 use crate::channel::ProxyToUi;
 use crate::http::models::{HttpVersion, RequestData, RequestId, ResponseData};
 use crate::proxy::intercept::{InterceptDecision, InterceptState};
+use crate::proxy::scope::Scope;
 use crate::proxy::tunnel;
+use crate::rules::{self, SharedRules};
 use crate::tls::cert_cache::CertCache;
 
 pub struct ProxyHandler {
     ui_tx: mpsc::UnboundedSender<ProxyToUi>,
     cert_cache: Arc<CertCache>,
     intercept: Arc<InterceptState>,
+    scope: Arc<Scope>,
+    rules: SharedRules,
 }
 
 impl ProxyHandler {
@@ -29,11 +33,15 @@ impl ProxyHandler {
         ui_tx: mpsc::UnboundedSender<ProxyToUi>,
         cert_cache: Arc<CertCache>,
         intercept: Arc<InterceptState>,
+        scope: Arc<Scope>,
+        rules: SharedRules,
     ) -> Self {
         Self {
             ui_tx,
             cert_cache,
             intercept,
+            scope,
+            rules,
         }
     }
 
@@ -59,11 +67,13 @@ impl ProxyHandler {
         let cert_cache = self.cert_cache.clone();
         let ui_tx = self.ui_tx.clone();
         let intercept = self.intercept.clone();
+        let scope = self.scope.clone();
+        let rules = self.rules.clone();
 
         tokio::spawn(async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
-                    tunnel::handle_tunnel(upgraded, host, port, cert_cache, ui_tx, intercept)
+                    tunnel::handle_tunnel(upgraded, host, port, cert_cache, ui_tx, intercept, scope, rules)
                         .await;
                 }
                 Err(e) => {
@@ -111,6 +121,8 @@ impl ProxyHandler {
         let (parts, body) = req.into_parts();
         let body_bytes = body.collect().await?.to_bytes();
 
+        let in_scope = self.scope.is_in_scope(&host);
+
         let mut request_data = RequestData {
             id: request_id,
             method: method.to_string(),
@@ -123,28 +135,36 @@ impl ProxyHandler {
             timestamp: std::time::SystemTime::now(),
         };
 
-        let _ = self
-            .ui_tx
-            .send(ProxyToUi::RequestCaptured(request_data.clone()));
+        if in_scope {
+            let _ = self
+                .ui_tx
+                .send(ProxyToUi::RequestCaptured(request_data.clone()));
+        }
 
-        // Check intercept
-        if let Some(rx) = self.intercept.intercept_request(&request_data, &self.ui_tx) {
-            match rx.await {
-                Ok(InterceptDecision::Drop) => {
-                    return Ok(Response::builder()
-                        .status(503)
-                        .body(Full::new(Bytes::from("Request dropped by interceptor")))
-                        .unwrap());
-                }
-                Ok(InterceptDecision::ForwardEdited(edited)) => {
-                    request_data = edited;
-                }
-                Ok(InterceptDecision::Forward) => {}
-                Err(_) => {
-                    // Oneshot sender dropped (TUI closed), forward anyway
+        if in_scope {
+            if let Some(rx) = self.intercept.intercept_request(&request_data, &self.ui_tx) {
+                match rx.await {
+                    Ok(InterceptDecision::Drop) => {
+                        return Ok(Response::builder()
+                            .status(503)
+                            .body(Full::new(Bytes::from("Request dropped by interceptor")))
+                            .unwrap());
+                    }
+                    Ok(InterceptDecision::ForwardEdited(edited)) => {
+                        request_data = edited;
+                    }
+                    Ok(InterceptDecision::Forward) => {}
+                    Err(_) => {}
                 }
             }
         }
+
+        rules::apply_request_rules(
+            &self.rules,
+            &mut request_data.uri,
+            &mut request_data.headers,
+            &mut request_data.body,
+        );
 
         let upstream_host = uri.host().unwrap_or(&host);
         let upstream_port = uri.port_u16().unwrap_or(80);
@@ -245,14 +265,16 @@ impl ProxyHandler {
             hyper::Version::HTTP_2 => HttpVersion::Http2,
             _ => HttpVersion::Http11,
         };
-        let resp_headers: Vec<(String, String)> = upstream_resp
+        let mut resp_headers: Vec<(String, String)> = upstream_resp
             .headers()
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
             .collect();
 
-        let resp_body = upstream_resp.collect().await?.to_bytes();
+        let mut resp_body = upstream_resp.collect().await?.to_bytes();
         let duration = start.elapsed();
+
+        rules::apply_response_rules(&self.rules, &mut resp_headers, &mut resp_body);
 
         let response_data = ResponseData {
             status: resp_status,
@@ -266,9 +288,11 @@ impl ProxyHandler {
             duration,
         };
 
-        let _ = self
-            .ui_tx
-            .send(ProxyToUi::ResponseReceived(request_id, response_data));
+        if in_scope {
+            let _ = self
+                .ui_tx
+                .send(ProxyToUi::ResponseReceived(request_id, response_data));
+        }
 
         let mut response = Response::builder().status(resp_status);
         for (key, value) in &resp_headers {

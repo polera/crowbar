@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use super::models::{EntryState, HistoryEntry, RequestData, RequestId, ResponseData};
+use crate::scanning::Finding;
+
+use super::models::{EntryState, HistoryEntry, RequestData, RequestId, ResponseData, WsMessage};
 
 pub struct InMemoryStore {
     entries: Vec<HistoryEntry>,
@@ -23,6 +25,8 @@ impl InMemoryStore {
             response: None,
             state: EntryState::Pending,
             error_message: None,
+            ws_messages: Vec::new(),
+            findings: Vec::new(),
         });
         self.index.insert(id, idx);
     }
@@ -44,6 +48,22 @@ impl InMemoryStore {
         }
     }
 
+    pub fn push_ws_message(&mut self, id: RequestId, msg: WsMessage) {
+        if let Some(&idx) = self.index.get(&id)
+            && let Some(entry) = self.entries.get_mut(idx)
+        {
+            entry.ws_messages.push(msg);
+        }
+    }
+
+    pub fn set_findings(&mut self, id: RequestId, findings: Vec<Finding>) {
+        if let Some(&idx) = self.index.get(&id)
+            && let Some(entry) = self.entries.get_mut(idx)
+        {
+            entry.findings = findings;
+        }
+    }
+
     pub fn mark_error(&mut self, id: RequestId, error: String) {
         if let Some(&idx) = self.index.get(&id)
             && let Some(entry) = self.entries.get_mut(idx)
@@ -55,6 +75,28 @@ impl InMemoryStore {
 
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
+    }
+
+    pub fn filtered_entries(&self, filter: &str) -> Vec<&HistoryEntry> {
+        if filter.is_empty() {
+            return self.entries.iter().collect();
+        }
+        let filter_lower = filter.to_lowercase();
+        self.entries
+            .iter()
+            .filter(|entry| entry.matches_filter(&filter_lower))
+            .collect()
+    }
+
+    pub fn load_entries(&mut self, entries: Vec<HistoryEntry>) {
+        self.entries.clear();
+        self.index.clear();
+        for entry in entries {
+            let id = entry.request.id;
+            let idx = self.entries.len();
+            self.entries.push(entry);
+            self.index.insert(id, idx);
+        }
     }
 
     pub fn len(&self) -> usize {

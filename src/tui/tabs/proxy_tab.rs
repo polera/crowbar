@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::tui::widgets::logo;
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
@@ -109,10 +110,13 @@ fn render_current_request(app: &App, frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::DarkGray),
         )
     } else {
-        Text::styled(
-            "Intercept is OFF.\n\nPress 'i' to enable intercept mode.\nRequests will pass through and appear in History.",
-            Style::default().fg(Color::DarkGray),
-        )
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Current Request ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        logo::render(frame, inner);
+        return;
     };
 
     let widget = Paragraph::new(content)

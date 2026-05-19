@@ -10,7 +10,6 @@ use hyper::service::service_fn;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
-use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -19,6 +18,8 @@ use tracing::{debug, error, warn};
 use crate::channel::ProxyToUi;
 use crate::http::models::{HttpVersion, RequestData, RequestId, ResponseData};
 use crate::proxy::intercept::{InterceptDecision, InterceptState};
+use crate::proxy::scope::Scope;
+use crate::rules::{self, SharedRules};
 use crate::tls::cert_cache::CertCache;
 use crate::tls::cert_gen;
 
@@ -29,8 +30,10 @@ pub async fn handle_tunnel(
     cert_cache: Arc<CertCache>,
     ui_tx: mpsc::UnboundedSender<ProxyToUi>,
     intercept: Arc<InterceptState>,
+    scope: Arc<Scope>,
+    rules: SharedRules,
 ) {
-    if let Err(e) = run_tunnel(upgraded, &host, port, cert_cache, ui_tx, intercept).await {
+    if let Err(e) = run_tunnel(upgraded, &host, port, cert_cache, ui_tx, intercept, scope, rules).await {
         debug!("Tunnel to {}:{} ended: {}", host, port, e);
     }
 }
@@ -42,6 +45,8 @@ async fn run_tunnel(
     cert_cache: Arc<CertCache>,
     ui_tx: mpsc::UnboundedSender<ProxyToUi>,
     intercept: Arc<InterceptState>,
+    scope: Arc<Scope>,
+    rules: SharedRules,
 ) -> anyhow::Result<()> {
     let certified_key = cert_cache.get_or_generate(host).await?;
     let server_config = cert_gen::build_server_config(certified_key)?;
@@ -56,7 +61,9 @@ async fn run_tunnel(
         let host = host.clone();
         let ui_tx = ui_tx.clone();
         let intercept = intercept.clone();
-        async move { handle_inner_request(req, &host, port, &ui_tx, &intercept).await }
+        let scope = scope.clone();
+        let rules = rules.clone();
+        async move { handle_inner_request(req, &host, port, &ui_tx, &intercept, &scope, &rules).await }
     });
 
     ServerBuilder::new()
@@ -82,12 +89,14 @@ async fn handle_inner_request(
     port: u16,
     ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
     intercept: &InterceptState,
+    scope: &Scope,
+    rules: &SharedRules,
 ) -> Result<hyper::Response<Full<Bytes>>, hyper::Error> {
     if is_websocket_upgrade(&req) {
-        return handle_websocket_upgrade(req, host, port, ui_tx).await;
+        return handle_websocket_upgrade(req, host, port, ui_tx, scope).await;
     }
 
-    handle_http_request(req, host, port, ui_tx, intercept).await
+    handle_http_request(req, host, port, ui_tx, intercept, scope, rules).await
 }
 
 async fn handle_websocket_upgrade(
@@ -95,7 +104,9 @@ async fn handle_websocket_upgrade(
     host: &str,
     port: u16,
     ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
+    scope: &Scope,
 ) -> Result<hyper::Response<Full<Bytes>>, hyper::Error> {
+    let in_scope = scope.is_in_scope(host);
     let request_id = RequestId::next();
 
     let headers: Vec<(String, String)> = req
@@ -125,7 +136,9 @@ async fn handle_websocket_upgrade(
         timestamp: std::time::SystemTime::now(),
     };
 
-    let _ = ui_tx.send(ProxyToUi::RequestCaptured(request_data));
+    if in_scope {
+        let _ = ui_tx.send(ProxyToUi::RequestCaptured(request_data));
+    }
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -248,7 +261,9 @@ async fn handle_websocket_upgrade(
         body: Bytes::new(),
         duration: std::time::Duration::ZERO,
     };
-    let _ = ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+    if in_scope {
+        let _ = ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+    }
 
     let ui_tx_clone = ui_tx.clone();
     let host_owned = host.to_string();
@@ -269,24 +284,17 @@ async fn handle_websocket_upgrade(
             }
         };
 
-        let mut client_io = TokioIo::new(client_upgraded);
-        let mut upstream_io = TokioIo::new(upstream_upgraded);
+        let client_io = TokioIo::new(client_upgraded);
+        let upstream_io = TokioIo::new(upstream_upgraded);
 
-        match copy_bidirectional(&mut client_io, &mut upstream_io).await {
-            Ok((to_upstream, to_client)) => {
-                debug!(
-                    "WebSocket relay for {} completed: {} bytes up, {} bytes down",
-                    host_owned, to_upstream, to_client
-                );
-            }
-            Err(e) => {
-                if !e.to_string().contains("connection") {
-                    debug!("WebSocket relay for {} error: {}", host_owned, e);
-                }
-            }
-        }
-
-        drop(ui_tx_clone);
+        crate::proxy::ws_relay::relay(
+            client_io,
+            upstream_io,
+            request_id,
+            ui_tx_clone,
+            in_scope,
+        )
+        .await;
     });
 
     let mut response = hyper::Response::builder().status(101);
@@ -303,7 +311,10 @@ async fn handle_http_request(
     port: u16,
     ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
     intercept: &InterceptState,
+    scope: &Scope,
+    rules: &SharedRules,
 ) -> Result<hyper::Response<Full<Bytes>>, hyper::Error> {
+    let in_scope = scope.is_in_scope(host);
     let request_id = RequestId::next();
     let start = Instant::now();
 
@@ -352,23 +363,32 @@ async fn handle_http_request(
         timestamp: std::time::SystemTime::now(),
     };
 
-    let _ = ui_tx.send(ProxyToUi::RequestCaptured(request_data.clone()));
+    if in_scope {
+        let _ = ui_tx.send(ProxyToUi::RequestCaptured(request_data.clone()));
 
-    if let Some(rx) = intercept.intercept_request(&request_data, ui_tx) {
-        match rx.await {
-            Ok(InterceptDecision::Drop) => {
-                return Ok(hyper::Response::builder()
-                    .status(503)
-                    .body(Full::new(Bytes::from("Request dropped by interceptor")))
-                    .unwrap());
+        if let Some(rx) = intercept.intercept_request(&request_data, ui_tx) {
+            match rx.await {
+                Ok(InterceptDecision::Drop) => {
+                    return Ok(hyper::Response::builder()
+                        .status(503)
+                        .body(Full::new(Bytes::from("Request dropped by interceptor")))
+                        .unwrap());
+                }
+                Ok(InterceptDecision::ForwardEdited(edited)) => {
+                    request_data = edited;
+                }
+                Ok(InterceptDecision::Forward) => {}
+                Err(_) => {}
             }
-            Ok(InterceptDecision::ForwardEdited(edited)) => {
-                request_data = edited;
-            }
-            Ok(InterceptDecision::Forward) => {}
-            Err(_) => {}
         }
     }
+
+    rules::apply_request_rules(
+        rules,
+        &mut request_data.uri,
+        &mut request_data.headers,
+        &mut request_data.body,
+    );
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -472,13 +492,13 @@ async fn handle_http_request(
         hyper::Version::HTTP_2 => HttpVersion::Http2,
         _ => HttpVersion::Http11,
     };
-    let resp_headers: Vec<(String, String)> = upstream_resp
+    let mut resp_headers: Vec<(String, String)> = upstream_resp
         .headers()
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
         .collect();
 
-    let resp_body = match upstream_resp.collect().await {
+    let mut resp_body = match upstream_resp.collect().await {
         Ok(b) => b.to_bytes(),
         Err(e) => {
             error!("Failed to read upstream response body: {}", e);
@@ -486,6 +506,8 @@ async fn handle_http_request(
         }
     };
     let duration = start.elapsed();
+
+    rules::apply_response_rules(rules, &mut resp_headers, &mut resp_body);
 
     let response_data = ResponseData {
         status: resp_status,
@@ -499,7 +521,9 @@ async fn handle_http_request(
         duration,
     };
 
-    let _ = ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+    if in_scope {
+        let _ = ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+    }
 
     let mut response = hyper::Response::builder().status(resp_status);
     for (key, value) in &resp_headers {

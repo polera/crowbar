@@ -6,36 +6,99 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::http::models::EntryState;
-use crate::tui::widgets::hex_view;
+use crate::tui::widgets::{body_view, logo};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
+    let filtered = app.store.filtered_entries(&app.history_filter);
+
     if app.store.len() == 0 {
-        let msg = Paragraph::new("Waiting for requests...\n\nConfigure your browser proxy to use this address.")
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" History "),
-            )
-            .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(msg, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" History ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        logo::render(frame, inner);
         return;
     }
 
-    if app.history_detail_open {
+    let has_filter = !app.history_filter.is_empty() || app.history_filtering;
+
+    let (filter_area, content_area) = if has_filter {
         let chunks = Layout::vertical([
-            Constraint::Percentage(40),
-            Constraint::Percentage(60),
+            Constraint::Length(1),
+            Constraint::Min(0),
         ])
         .split(area);
-
-        render_table(app, frame, chunks[0]);
-        render_detail(app, frame, chunks[1]);
+        (Some(chunks[0]), chunks[1])
     } else {
-        render_table(app, frame, area);
+        (None, area)
+    };
+
+    if let Some(filter_area) = filter_area {
+        render_filter_bar(app, frame, filter_area, filtered.len());
+    }
+
+    if app.history_detail_open {
+        let selected = filtered.get(app.history_selected);
+        let has_ws = selected.is_some_and(|e| !e.ws_messages.is_empty());
+        let has_findings = selected.is_some_and(|e| !e.findings.is_empty());
+
+        if has_ws || has_findings {
+            let mut constraints = vec![
+                Constraint::Percentage(25),
+                Constraint::Percentage(35),
+            ];
+            let extra_panes = has_ws as usize + has_findings as usize;
+            let remaining = 40u16 / extra_panes as u16;
+            for _ in 0..extra_panes {
+                constraints.push(Constraint::Percentage(remaining));
+            }
+
+            let chunks = Layout::vertical(constraints).split(content_area);
+
+            render_table_filtered(app, &filtered, frame, chunks[0]);
+            render_detail_filtered(app, &filtered, frame, chunks[1]);
+            let mut pane_idx = 2;
+            if has_findings {
+                render_findings(app, &filtered, frame, chunks[pane_idx]);
+                pane_idx += 1;
+            }
+            if has_ws {
+                render_ws_messages(app, &filtered, frame, chunks[pane_idx]);
+            }
+        } else {
+            let chunks = Layout::vertical([
+                Constraint::Percentage(40),
+                Constraint::Percentage(60),
+            ])
+            .split(content_area);
+
+            render_table_filtered(app, &filtered, frame, chunks[0]);
+            render_detail_filtered(app, &filtered, frame, chunks[1]);
+        }
+    } else {
+        render_table_filtered(app, &filtered, frame, content_area);
     }
 }
 
-fn render_table(app: &App, frame: &mut Frame, area: Rect) {
+fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect, match_count: usize) {
+    let cursor_indicator = if app.history_filtering { "█" } else { "" };
+    let count_text = if app.history_filter.is_empty() {
+        String::new()
+    } else {
+        format!(" ({} matches)", match_count)
+    };
+
+    let line = Line::from(vec![
+        Span::styled(" /", Style::default().fg(Color::Yellow)),
+        Span::raw(&app.history_filter),
+        Span::styled(cursor_indicator, Style::default().fg(Color::Yellow)),
+        Span::styled(count_text, Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
     let header = Row::new(vec![
         Cell::from("#"),
         Cell::from("Method"),
@@ -48,9 +111,7 @@ fn render_table(app: &App, frame: &mut Frame, area: Rect) {
     .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
     .height(1);
 
-    let rows: Vec<Row> = app
-        .store
-        .entries()
+    let rows: Vec<Row> = filtered
         .iter()
         .map(|entry| {
             let req = &entry.request;
@@ -139,7 +200,7 @@ fn render_table(app: &App, frame: &mut Frame, area: Rect) {
     let help = if app.history_detail_open {
         " History (Enter/Esc:close) "
     } else {
-        " History (Enter:detail j/k:nav) "
+        " History (Enter:detail j/k:nav /:filter) "
     };
 
     let table = Table::new(rows, widths)
@@ -153,9 +214,8 @@ fn render_table(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
-    let entries = app.store.entries();
-    let entry = match entries.get(app.history_selected) {
+fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+    let entry = match filtered.get(app.history_selected) {
         Some(e) => e,
         None => return,
     };
@@ -192,26 +252,10 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
 
     if !req.body.is_empty() {
         req_lines.push(Line::raw(""));
-        match std::str::from_utf8(&req.body) {
-            Ok(text) => {
-                for line in text.lines().take(50) {
-                    req_lines.push(Line::raw(line.to_string()));
-                }
-                if text.lines().count() > 50 {
-                    req_lines.push(Line::styled(
-                        "... truncated",
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
-            }
-            Err(_) => {
-                req_lines.push(Line::styled(
-                    format!("[binary: {} bytes]", req.body.len()),
-                    Style::default().fg(Color::DarkGray),
-                ));
-                req_lines.extend(hex_view::hex_lines(&req.body, 32));
-            }
-        }
+        let content_type = req.headers.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.as_str());
+        req_lines.extend(body_view::body_lines(&req.body, content_type, 100));
     }
 
     let req_paragraph = Paragraph::new(Text::from(req_lines))
@@ -265,26 +309,10 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
 
             if !resp.body.is_empty() {
                 resp_lines.push(Line::raw(""));
-                match std::str::from_utf8(&resp.body) {
-                    Ok(text) => {
-                        for line in text.lines().take(100) {
-                            resp_lines.push(Line::raw(line.to_string()));
-                        }
-                        if text.lines().count() > 100 {
-                            resp_lines.push(Line::styled(
-                                "... truncated",
-                                Style::default().fg(Color::DarkGray),
-                            ));
-                        }
-                    }
-                    Err(_) => {
-                        resp_lines.push(Line::styled(
-                            format!("[binary: {} bytes]", resp.body.len()),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                        resp_lines.extend(hex_view::hex_lines(&resp.body, 64));
-                    }
-                }
+                let content_type = resp.headers.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, v)| v.as_str());
+                resp_lines.extend(body_view::body_lines(&resp.body, content_type, 200));
             }
         }
         None => {
@@ -328,6 +356,122 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
             &mut scrollbar_state,
         );
     }
+}
+
+fn render_findings(_app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+    let entry = match filtered.get(_app.history_selected) {
+        Some(e) => e,
+        None => return,
+    };
+
+    use crate::scanning::Severity;
+
+    let mut lines: Vec<Line> = Vec::new();
+    for finding in &entry.findings {
+        let severity_style = match finding.severity {
+            Severity::High => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Severity::Medium => Style::default().fg(Color::Yellow),
+            Severity::Low => Style::default().fg(Color::Cyan),
+            Severity::Info => Style::default().fg(Color::DarkGray),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" [{:>4}] ", finding.severity.label()),
+                severity_style,
+            ),
+            Span::styled(&finding.title, Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("         "),
+            Span::styled(&finding.detail, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    let title = format!(" Findings ({}) ", entry.findings.len());
+    let widget = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((_app.history_scroll, 0));
+
+    frame.render_widget(widget, area);
+}
+
+fn render_ws_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+    let entry = match filtered.get(app.history_selected) {
+        Some(e) => e,
+        None => return,
+    };
+
+    use crate::http::models::WsDirection;
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, msg) in entry.ws_messages.iter().enumerate() {
+        let dir_span = match msg.direction {
+            WsDirection::ClientToServer => Span::styled(
+                ">>> ",
+                Style::default().fg(Color::Green),
+            ),
+            WsDirection::ServerToClient => Span::styled(
+                "<<< ",
+                Style::default().fg(Color::Cyan),
+            ),
+        };
+
+        let type_label = if msg.is_text() {
+            "text"
+        } else if msg.is_binary() {
+            "bin"
+        } else if msg.is_close() {
+            "close"
+        } else {
+            "ctrl"
+        };
+
+        let preview = if let Some(text) = msg.text() {
+            let truncated: String = text.chars().take(120).collect();
+            if text.len() > 120 {
+                format!("{truncated}...")
+            } else {
+                truncated
+            }
+        } else {
+            format!("[{} bytes]", msg.payload.len())
+        };
+
+        let idx_span = Span::styled(
+            format!("{:>4} ", i + 1),
+            Style::default().fg(Color::DarkGray),
+        );
+
+        let type_span = Span::styled(
+            format!("[{}] ", type_label),
+            Style::default().fg(Color::DarkGray),
+        );
+
+        lines.push(Line::from(vec![
+            idx_span,
+            dir_span,
+            type_span,
+            Span::raw(preview),
+        ]));
+    }
+
+    let title = format!(" WebSocket ({} messages) ", entry.ws_messages.len());
+    let widget = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.history_scroll, 0));
+
+    frame.render_widget(widget, area);
 }
 
 fn format_size(bytes: usize) -> String {

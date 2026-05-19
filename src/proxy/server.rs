@@ -12,6 +12,8 @@ use tracing::{error, info};
 use crate::channel::ProxyToUi;
 use crate::proxy::handler::ProxyHandler;
 use crate::proxy::intercept::InterceptState;
+use crate::proxy::scope::Scope;
+use crate::rules::SharedRules;
 use crate::tls::cert_cache::CertCache;
 
 pub struct ProxyServer {
@@ -19,6 +21,8 @@ pub struct ProxyServer {
     ui_tx: mpsc::UnboundedSender<ProxyToUi>,
     cert_cache: Arc<CertCache>,
     intercept: Arc<InterceptState>,
+    scope: Arc<Scope>,
+    rules: SharedRules,
     cancel: CancellationToken,
 }
 
@@ -28,6 +32,8 @@ impl ProxyServer {
         ui_tx: mpsc::UnboundedSender<ProxyToUi>,
         cert_cache: Arc<CertCache>,
         intercept: Arc<InterceptState>,
+        scope: Arc<Scope>,
+        rules: SharedRules,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -35,6 +41,8 @@ impl ProxyServer {
             ui_tx,
             cert_cache,
             intercept,
+            scope,
+            rules,
             cancel,
         }
     }
@@ -47,6 +55,8 @@ impl ProxyServer {
             self.ui_tx,
             self.cert_cache,
             self.intercept,
+            self.scope,
+            self.rules,
         ));
 
         loop {
