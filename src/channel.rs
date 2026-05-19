@@ -1,4 +1,4 @@
-use crate::http::models::{RequestData, RequestId, ResponseData, WsMessage};
+use crate::http::models::{GrpcMessage, RequestData, RequestId, ResponseData, WsMessage};
 
 #[derive(Debug)]
 pub enum ProxyToUi {
@@ -9,6 +9,8 @@ pub enum ProxyToUi {
     RepeaterResponse(ResponseData),
     RepeaterError(String),
     WebSocketFrame(RequestId, WsMessage),
+    GrpcFrame(RequestId, GrpcMessage),
+    GrpcTrailers(RequestId, Vec<(String, String)>),
     MacroResponse(usize, ResponseData),
     MacroError(usize, String),
 }

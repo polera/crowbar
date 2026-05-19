@@ -1,5 +1,5 @@
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap};
 use ratatui::Frame;
@@ -41,14 +41,15 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     if app.history_detail_open {
         let selected = filtered.get(app.history_selected);
         let has_ws = selected.is_some_and(|e| !e.ws_messages.is_empty());
+        let has_grpc = selected.is_some_and(|e| !e.grpc_messages.is_empty());
         let has_findings = selected.is_some_and(|e| !e.findings.is_empty());
 
-        if has_ws || has_findings {
+        if has_ws || has_grpc || has_findings {
             let mut constraints = vec![
                 Constraint::Percentage(25),
                 Constraint::Percentage(35),
             ];
-            let extra_panes = has_ws as usize + has_findings as usize;
+            let extra_panes = has_ws as usize + has_grpc as usize + has_findings as usize;
             let remaining = 40u16 / extra_panes as u16;
             for _ in 0..extra_panes {
                 constraints.push(Constraint::Percentage(remaining));
@@ -65,6 +66,10 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
             }
             if has_ws {
                 render_ws_messages(app, &filtered, frame, chunks[pane_idx]);
+                pane_idx += 1;
+            }
+            if has_grpc {
+                render_grpc_messages(app, &filtered, frame, chunks[pane_idx]);
             }
         } else {
             let chunks = Layout::vertical([
@@ -133,7 +138,14 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
 
             let (status, size, duration) = match &entry.response {
                 Some(resp) => {
-                    let status_str = resp.status.to_string();
+                    let status_str = if req.is_grpc {
+                        match resp.grpc_status() {
+                            Some((_, name)) => format!("g:{}", name),
+                            None => resp.status.to_string(),
+                        }
+                    } else {
+                        resp.status.to_string()
+                    };
                     let size_str = format_size(resp.body.len());
                     let dur_str = format!("{:.0?}", resp.duration);
                     (status_str, size_str, dur_str)
@@ -155,7 +167,17 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
                 _ => Style::default(),
             };
 
-            let status_style = if let Some(resp) = &entry.response {
+            let status_style = if req.is_grpc {
+                if let Some(resp) = &entry.response {
+                    match resp.grpc_status() {
+                        Some((0, _)) => Style::default().fg(Color::Green),
+                        Some(_) => Style::default().fg(Color::Red),
+                        None => Style::default().fg(Color::DarkGray),
+                    }
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }
+            } else if let Some(resp) = &entry.response {
                 match resp.status {
                     200..=299 => Style::default().fg(Color::Green),
                     300..=399 => Style::default().fg(Color::Yellow),
@@ -188,7 +210,7 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
         Constraint::Length(7),
         Constraint::Min(15),
         Constraint::Min(20),
-        Constraint::Length(6),
+        Constraint::Length(12),
         Constraint::Length(8),
         Constraint::Length(10),
     ];
@@ -297,6 +319,28 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
+
+            if entry.request.is_grpc
+                && let Some((code, name)) = resp.grpc_status() {
+                    let grpc_style = if code == 0 {
+                        Style::default().fg(Color::Green).bold()
+                    } else {
+                        Style::default().fg(Color::Red).bold()
+                    };
+                    let mut grpc_spans = vec![
+                        Span::styled("gRPC ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{} {}", code, name), grpc_style),
+                    ];
+                    if let Some(msg) = resp.grpc_message()
+                        && !msg.is_empty() {
+                            grpc_spans.push(Span::styled(
+                                format!("  {}", msg),
+                                Style::default().fg(Color::Yellow),
+                            ));
+                        }
+                    resp_lines.push(Line::from(grpc_spans));
+                }
+
             resp_lines.push(Line::raw(""));
 
             for (key, value) in &resp.headers {
@@ -313,6 +357,30 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.as_str());
                 resp_lines.extend(body_view::body_lines(&resp.body, content_type, 200));
+            }
+
+            if !resp.trailers.is_empty() {
+                resp_lines.push(Line::raw(""));
+                resp_lines.push(Line::styled(
+                    "──── Trailers ────",
+                    Style::default().fg(Color::DarkGray),
+                ));
+                for (key, value) in &resp.trailers {
+                    let value_style = if key == "grpc-status" {
+                        if value == "0" {
+                            Style::default().fg(Color::Green)
+                        } else {
+                            Style::default().fg(Color::Red)
+                        }
+                    } else {
+                        Style::default()
+                    };
+                    resp_lines.push(Line::from(vec![
+                        Span::styled(key, Style::default().fg(Color::Cyan)),
+                        Span::raw(": "),
+                        Span::styled(value, value_style),
+                    ]));
+                }
             }
         }
         None => {
@@ -462,6 +530,81 @@ fn render_ws_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry]
     }
 
     let title = format!(" WebSocket ({} messages) ", entry.ws_messages.len());
+    let widget = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.history_scroll, 0));
+
+    frame.render_widget(widget, area);
+}
+
+fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+    let entry = match filtered.get(app.history_selected) {
+        Some(e) => e,
+        None => return,
+    };
+
+    use crate::http::models::GrpcDirection;
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, msg) in entry.grpc_messages.iter().enumerate() {
+        let dir_span = match msg.direction {
+            GrpcDirection::ClientToServer => Span::styled(
+                ">>> ",
+                Style::default().fg(Color::Green),
+            ),
+            GrpcDirection::ServerToClient => Span::styled(
+                "<<< ",
+                Style::default().fg(Color::Cyan),
+            ),
+        };
+
+        let size = format_size(msg.payload.len());
+        let compressed_label = if msg.compressed { " [compressed]" } else { "" };
+
+        let preview = if msg.payload.is_empty() {
+            "[empty]".to_string()
+        } else {
+            use crate::http::protobuf::decode_raw;
+            if let Some(fields) = decode_raw(&msg.payload) {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .take(3)
+                    .map(|f| format!("{}={}", f.number, f.value))
+                    .collect();
+                let mut s = parts.join(", ");
+                if fields.len() > 3 {
+                    s.push_str(&format!(" (+{} more)", fields.len() - 3));
+                }
+                s
+            } else {
+                format!("[{} bytes]", msg.payload.len())
+            }
+        };
+
+        let idx_span = Span::styled(
+            format!("{:>4} ", i + 1),
+            Style::default().fg(Color::DarkGray),
+        );
+
+        let size_span = Span::styled(
+            format!("[{}{}] ", size, compressed_label),
+            Style::default().fg(Color::DarkGray),
+        );
+
+        lines.push(Line::from(vec![
+            idx_span,
+            dir_span,
+            size_span,
+            Span::raw(preview),
+        ]));
+    }
+
+    let title = format!(" gRPC Messages ({}) ", entry.grpc_messages.len());
     let widget = Paragraph::new(Text::from(lines))
         .block(
             Block::default()

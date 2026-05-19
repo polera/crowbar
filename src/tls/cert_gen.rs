@@ -35,7 +35,7 @@ pub fn build_server_config(certified_key: Arc<CertifiedKey>) -> anyhow::Result<A
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(SingleCertResolver(certified_key)));
 
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(config))
 }

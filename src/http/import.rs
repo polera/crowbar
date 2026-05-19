@@ -33,7 +33,7 @@ fn load_har(path: &Path) -> anyhow::Result<Vec<HistoryEntry>> {
         .log
         .entries
         .into_iter()
-        .map(|e| convert_har_entry(e))
+        .map(convert_har_entry)
         .collect();
 
     Ok(entries)
@@ -71,6 +71,7 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         headers,
         body,
         is_tls,
+        is_grpc: false,
         timestamp,
     };
 
@@ -97,6 +98,7 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         version: resp_version,
         headers: resp_headers,
         body: resp_body,
+        trailers: Vec::new(),
         duration,
     };
 
@@ -106,6 +108,7 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         state: EntryState::Complete,
         error_message: None,
         ws_messages: Vec::new(),
+        grpc_messages: Vec::new(),
         findings: Vec::new(),
     }
 }
@@ -161,8 +164,8 @@ fn parse_iso_timestamp(s: &str) -> Option<SystemTime> {
         [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
 
-    for i in 0..(month as usize).saturating_sub(1) {
-        days += months[i];
+    for m in months.iter().take((month as usize).saturating_sub(1)) {
+        days += m;
     }
     days += day.saturating_sub(1);
 
@@ -171,7 +174,7 @@ fn parse_iso_timestamp(s: &str) -> Option<SystemTime> {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 #[derive(Deserialize)]

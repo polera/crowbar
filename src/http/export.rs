@@ -84,7 +84,7 @@ pub fn to_har(entries: &[HistoryEntry]) -> String {
     let har_entries: Vec<serde_json::Value> = entries
         .iter()
         .filter(|e| e.response.is_some())
-        .map(|e| har_entry(e))
+        .map(har_entry)
         .collect();
 
     let har = json!({
@@ -116,10 +116,7 @@ fn har_entry(entry: &HistoryEntry) -> serde_json::Value {
         .timestamp
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let started = format!(
-        "{}",
-        chrono_lite_iso(timestamp.as_secs())
-    );
+    let started = chrono_lite_iso(timestamp.as_secs()).to_string();
 
     let req_headers: Vec<serde_json::Value> = req
         .headers
@@ -246,7 +243,7 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 fn extract_path(uri: &str) -> &str {

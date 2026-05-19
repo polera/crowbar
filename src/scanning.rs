@@ -204,6 +204,7 @@ mod tests {
             headers: vec![],
             body: Bytes::new(),
             is_tls,
+            is_grpc: false,
             timestamp: SystemTime::now(),
         }
     }
@@ -215,6 +216,7 @@ mod tests {
             version: HttpVersion::Http11,
             headers: headers.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
             body: Bytes::from(body.to_string()),
+            trailers: Vec::new(),
             duration: Duration::from_millis(50),
         }
     }

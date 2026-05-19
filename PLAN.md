@@ -25,3 +25,11 @@
 - [x] Diff view between original and edited requests
 - [x] Macro/sequence support — chain multiple requests
 - [x] Passive vulnerability scanning (flag common issues in responses)
+
+## Phase 5: gRPC Interception
+
+- [x] gRPC-over-HTTP/2 detection and transparent proxying
+- [x] Protobuf deserialization — decode request/response bodies using reflection or user-supplied `.proto` files
+- [x] gRPC metadata display — surface headers, trailers, and status codes in the History tab
+- [x] Streaming support — handle unary, server-streaming, client-streaming, and bidirectional calls
+- [x] gRPC request editing and replay

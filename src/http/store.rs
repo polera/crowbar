@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::scanning::Finding;
 
-use super::models::{EntryState, HistoryEntry, RequestData, RequestId, ResponseData, WsMessage};
+use super::models::{EntryState, GrpcMessage, HistoryEntry, RequestData, RequestId, ResponseData, WsMessage};
 
 pub struct InMemoryStore {
     entries: Vec<HistoryEntry>,
@@ -26,6 +26,7 @@ impl InMemoryStore {
             state: EntryState::Pending,
             error_message: None,
             ws_messages: Vec::new(),
+            grpc_messages: Vec::new(),
             findings: Vec::new(),
         });
         self.index.insert(id, idx);
@@ -54,6 +55,22 @@ impl InMemoryStore {
         {
             entry.ws_messages.push(msg);
         }
+    }
+
+    pub fn push_grpc_message(&mut self, id: RequestId, msg: GrpcMessage) {
+        if let Some(&idx) = self.index.get(&id)
+            && let Some(entry) = self.entries.get_mut(idx)
+        {
+            entry.grpc_messages.push(msg);
+        }
+    }
+
+    pub fn update_trailers(&mut self, id: RequestId, trailers: Vec<(String, String)>) {
+        if let Some(&idx) = self.index.get(&id)
+            && let Some(entry) = self.entries.get_mut(idx)
+            && let Some(resp) = &mut entry.response {
+                resp.trailers = trailers;
+            }
     }
 
     pub fn set_findings(&mut self, id: RequestId, findings: Vec<Finding>) {

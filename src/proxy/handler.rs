@@ -132,6 +132,7 @@ impl ProxyHandler {
             headers: headers.clone(),
             body: body_bytes.clone(),
             is_tls: false,
+            is_grpc: false,
             timestamp: std::time::SystemTime::now(),
         };
 
@@ -141,8 +142,8 @@ impl ProxyHandler {
                 .send(ProxyToUi::RequestCaptured(request_data.clone()));
         }
 
-        if in_scope {
-            if let Some(rx) = self.intercept.intercept_request(&request_data, &self.ui_tx) {
+        if in_scope
+            && let Some(rx) = self.intercept.intercept_request(&request_data, &self.ui_tx) {
                 match rx.await {
                     Ok(InterceptDecision::Drop) => {
                         return Ok(Response::builder()
@@ -157,7 +158,6 @@ impl ProxyHandler {
                     Err(_) => {}
                 }
             }
-        }
 
         rules::apply_request_rules(
             &self.rules,
@@ -285,6 +285,7 @@ impl ProxyHandler {
             version: resp_version,
             headers: resp_headers.clone(),
             body: resp_body.clone(),
+            trailers: Vec::new(),
             duration,
         };
 

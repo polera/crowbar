@@ -48,6 +48,8 @@ pub struct RequestData {
     #[serde(with = "bytes_base64")]
     pub body: Bytes,
     pub is_tls: bool,
+    #[serde(default)]
+    pub is_grpc: bool,
     pub timestamp: SystemTime,
 }
 
@@ -59,7 +61,53 @@ pub struct ResponseData {
     pub headers: Vec<(String, String)>,
     #[serde(with = "bytes_base64")]
     pub body: Bytes,
+    #[serde(default)]
+    pub trailers: Vec<(String, String)>,
     pub duration: Duration,
+}
+
+impl ResponseData {
+    pub fn grpc_status(&self) -> Option<(u32, &'static str)> {
+        let status_str = self
+            .trailers
+            .iter()
+            .chain(self.headers.iter())
+            .find(|(k, _)| k == "grpc-status")
+            .map(|(_, v)| v.as_str())?;
+        let code: u32 = status_str.parse().ok()?;
+        Some((code, grpc_status_name(code)))
+    }
+
+    pub fn grpc_message(&self) -> Option<&str> {
+        self.trailers
+            .iter()
+            .chain(self.headers.iter())
+            .find(|(k, _)| k == "grpc-message")
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+pub fn grpc_status_name(code: u32) -> &'static str {
+    match code {
+        0 => "OK",
+        1 => "CANCELLED",
+        2 => "UNKNOWN",
+        3 => "INVALID_ARGUMENT",
+        4 => "DEADLINE_EXCEEDED",
+        5 => "NOT_FOUND",
+        6 => "ALREADY_EXISTS",
+        7 => "PERMISSION_DENIED",
+        8 => "RESOURCE_EXHAUSTED",
+        9 => "FAILED_PRECONDITION",
+        10 => "ABORTED",
+        11 => "OUT_OF_RANGE",
+        12 => "UNIMPLEMENTED",
+        13 => "INTERNAL",
+        14 => "UNAVAILABLE",
+        15 => "DATA_LOSS",
+        16 => "UNAUTHENTICATED",
+        _ => "UNKNOWN",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +155,21 @@ impl WsMessage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GrpcDirection {
+    ClientToServer,
+    ServerToClient,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcMessage {
+    pub direction: GrpcDirection,
+    pub compressed: bool,
+    #[serde(with = "bytes_base64")]
+    pub payload: Bytes,
+    pub timestamp: SystemTime,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub request: RequestData,
@@ -115,6 +178,8 @@ pub struct HistoryEntry {
     pub error_message: Option<String>,
     #[serde(default)]
     pub ws_messages: Vec<WsMessage>,
+    #[serde(default)]
+    pub grpc_messages: Vec<GrpcMessage>,
     #[serde(default)]
     pub findings: Vec<crate::scanning::Finding>,
 }
@@ -131,10 +196,12 @@ impl HistoryEntry {
         if req.uri.to_lowercase().contains(filter) {
             return true;
         }
-        if let Some(resp) = &self.response {
-            if resp.status.to_string().contains(filter) {
+        if let Some(resp) = &self.response
+            && resp.status.to_string().contains(filter) {
                 return true;
             }
+        if self.request.is_grpc && "grpc".contains(filter) {
+            return true;
         }
         false
     }
@@ -153,7 +220,7 @@ mod bytes_base64 {
         let s = String::deserialize(d)?;
         base64::engine::general_purpose::STANDARD
             .decode(&s)
-            .map(|v| Bytes::from(v))
+            .map(Bytes::from)
             .map_err(serde::de::Error::custom)
     }
 }

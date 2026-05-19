@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http1::Builder as ClientBuilder;
 use hyper::Request;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -20,7 +21,9 @@ pub async fn send_request(
 ) {
     let start = Instant::now();
 
-    let result = if request.is_tls {
+    let result = if request.is_grpc {
+        send_h2(&request).await
+    } else if request.is_tls {
         send_https(&request).await
     } else {
         send_http(&request).await
@@ -39,7 +42,9 @@ pub async fn send_request(
 
 pub async fn send_raw_request(request: RequestData) -> Result<ResponseData, String> {
     let start = Instant::now();
-    let result = if request.is_tls {
+    let result = if request.is_grpc {
+        send_h2(&request).await
+    } else if request.is_tls {
         send_https(&request).await
     } else {
         send_http(&request).await
@@ -137,6 +142,58 @@ async fn send_https(request: &RequestData) -> anyhow::Result<ResponseData> {
     parse_response(resp).await
 }
 
+async fn send_h2(request: &RequestData) -> anyhow::Result<ResponseData> {
+    let host = &request.host;
+    let port = extract_port(&request.uri).unwrap_or(443);
+    let addr = format!("{}:{}", host, port);
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h2".to_vec()];
+    let client_config = Arc::new(client_config);
+
+    let tcp = TcpStream::connect(&addr).await?;
+    let server_name = ServerName::try_from(host.clone())
+        .unwrap_or_else(|_| ServerName::try_from("localhost".to_string()).unwrap());
+    let connector = TlsConnector::from(client_config);
+    let tls_stream = connector.connect(server_name, tcp).await?;
+
+    let io = TokioIo::new(tls_stream);
+    let (mut sender, conn) =
+        hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .handshake(io)
+            .await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            debug!("Repeater H2 connection ended: {}", e);
+        }
+    });
+
+    let path = extract_path(&request.uri);
+    let upstream_uri = if port == 443 {
+        format!("https://{}{}", host, path)
+    } else {
+        format!("https://{}:{}{}", host, port, path)
+    };
+
+    let mut req = Request::builder()
+        .method(request.method.as_str())
+        .uri(&upstream_uri);
+
+    for (key, value) in &request.headers {
+        req = req.header(key.as_str(), value.as_str());
+    }
+
+    let req = req.body(Full::new(request.body.clone()))?;
+    let resp = sender.send_request(req).await?;
+
+    parse_h2_response(resp).await
+}
+
 async fn parse_response(
     resp: hyper::Response<hyper::body::Incoming>,
 ) -> anyhow::Result<ResponseData> {
@@ -164,6 +221,49 @@ async fn parse_response(
         version,
         headers,
         body,
+        trailers: Vec::new(),
+        duration: std::time::Duration::ZERO,
+    })
+}
+
+async fn parse_h2_response(
+    resp: hyper::Response<hyper::body::Incoming>,
+) -> anyhow::Result<ResponseData> {
+    let status = resp.status().as_u16();
+    let headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+        .collect();
+
+    let collected = resp.into_body().collect().await?;
+    let trailers_hm = collected.trailers().cloned();
+    let body = collected.to_bytes();
+
+    let trailers: Vec<(String, String)> = trailers_hm
+        .map(|t| {
+            t.iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let resp_body = if body.is_empty() && !trailers.is_empty() {
+        Bytes::new()
+    } else {
+        body
+    };
+
+    Ok(ResponseData {
+        status,
+        reason: http::StatusCode::from_u16(status)
+            .map(|s| s.canonical_reason().unwrap_or(""))
+            .unwrap_or("")
+            .to_string(),
+        version: HttpVersion::Http2,
+        headers,
+        body: resp_body,
+        trailers,
         duration: std::time::Duration::ZERO,
     })
 }

@@ -1,6 +1,7 @@
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
+use crate::http::protobuf::{self, ProtoField, ProtoValue};
 use crate::tui::widgets::hex_view;
 
 pub fn body_lines<'a>(
@@ -8,6 +9,16 @@ pub fn body_lines<'a>(
     content_type: Option<&str>,
     max_lines: usize,
 ) -> Vec<Line<'a>> {
+    let ct = content_type.unwrap_or("");
+
+    if ct.starts_with("application/grpc") {
+        return render_grpc(body, max_lines);
+    }
+
+    if ct.contains("protobuf") || ct.contains("x-protobuf") {
+        return render_protobuf(body, max_lines);
+    }
+
     let text = match std::str::from_utf8(body) {
         Ok(t) => t,
         Err(_) => {
@@ -19,8 +30,6 @@ pub fn body_lines<'a>(
             return lines;
         }
     };
-
-    let ct = content_type.unwrap_or("");
 
     if ct.contains("json") {
         return render_json(text, max_lines);
@@ -73,8 +82,8 @@ fn render_json<'a>(text: &str, max_lines: usize) -> Vec<Line<'a>> {
 fn colorize_json_line<'a>(line: &str) -> Line<'a> {
     let trimmed = line.trim_start();
 
-    if trimmed.starts_with('"') {
-        if let Some(colon_pos) = trimmed.find("\": ") {
+    if trimmed.starts_with('"')
+        && let Some(colon_pos) = trimmed.find("\": ") {
             let indent = &line[..line.len() - trimmed.len()];
             let key = &trimmed[..colon_pos + 1];
             let rest = &trimmed[colon_pos + 1..];
@@ -85,7 +94,6 @@ fn colorize_json_line<'a>(line: &str) -> Line<'a> {
                 Span::styled(rest.to_string(), value_style(rest.trim_start().trim_start_matches(": "))),
             ]);
         }
-    }
 
     if trimmed.starts_with('"') {
         return Line::styled(line.to_string(), Style::default().fg(Color::Green));
@@ -190,7 +198,7 @@ fn render_multipart<'a>(text: &str, content_type: &str, max_lines: usize) -> Vec
         }
 
         lines.push(Line::styled(
-            format!("──── part ────"),
+            "──── part ────".to_string(),
             Style::default().fg(Color::DarkGray),
         ));
 
@@ -224,13 +232,226 @@ fn render_multipart<'a>(text: &str, content_type: &str, max_lines: usize) -> Vec
     lines
 }
 
+fn render_grpc<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
+    if body.len() < 5 {
+        return vec![Line::styled(
+            format!("[gRPC: {} bytes, too small to decode]", body.len()),
+            Style::default().fg(Color::DarkGray),
+        )];
+    }
+
+    let messages = protobuf::decode_grpc_body(body);
+
+    if messages.is_empty() {
+        let mut lines = vec![Line::styled(
+            format!("[gRPC: {} bytes, invalid frame]", body.len()),
+            Style::default().fg(Color::DarkGray),
+        )];
+        lines.extend(hex_view::hex_lines(body, 64));
+        return lines;
+    }
+
+    let mut lines: Vec<Line<'a>> = Vec::new();
+
+    for (i, msg) in messages.iter().enumerate() {
+        if lines.len() >= max_lines {
+            lines.push(Line::styled(
+                "... truncated",
+                Style::default().fg(Color::DarkGray),
+            ));
+            break;
+        }
+
+        let label = if messages.len() == 1 {
+            format!(
+                "── gRPC message ({} bytes{}) ──",
+                msg.size,
+                if msg.compressed { ", compressed" } else { "" }
+            )
+        } else {
+            format!(
+                "── gRPC message {} ({} bytes{}) ──",
+                i + 1,
+                msg.size,
+                if msg.compressed { ", compressed" } else { "" }
+            )
+        };
+        lines.push(Line::styled(label, Style::default().fg(Color::DarkGray)));
+
+        if msg.compressed {
+            lines.push(Line::styled(
+                "  [compressed payload, cannot decode]",
+                Style::default().fg(Color::Yellow),
+            ));
+            continue;
+        }
+
+        match &msg.fields {
+            Some(fields) => render_proto_fields(fields, 1, max_lines, &mut lines),
+            None => lines.push(Line::styled(
+                "  [could not decode protobuf]",
+                Style::default().fg(Color::Yellow),
+            )),
+        }
+    }
+
+    lines
+}
+
+fn render_protobuf<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
+    match protobuf::decode_raw(body) {
+        Some(fields) => {
+            let mut lines = vec![Line::styled(
+                format!("[protobuf: {} bytes]", body.len()),
+                Style::default().fg(Color::DarkGray),
+            )];
+            render_proto_fields(&fields, 1, max_lines, &mut lines);
+            lines
+        }
+        None => {
+            let mut lines = vec![Line::styled(
+                format!("[protobuf: {} bytes, could not decode]", body.len()),
+                Style::default().fg(Color::DarkGray),
+            )];
+            lines.extend(hex_view::hex_lines(body, 64));
+            lines
+        }
+    }
+}
+
+fn render_proto_fields<'a>(
+    fields: &[ProtoField],
+    depth: usize,
+    max_lines: usize,
+    lines: &mut Vec<Line<'a>>,
+) {
+    let indent = "  ".repeat(depth);
+
+    for field in fields {
+        if lines.len() >= max_lines {
+            lines.push(Line::styled(
+                "... truncated",
+                Style::default().fg(Color::DarkGray),
+            ));
+            return;
+        }
+
+        match &field.value {
+            ProtoValue::Varint(v) => {
+                lines.push(Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(
+                        field.number.to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(v.to_string(), Style::default().fg(Color::Magenta)),
+                ]));
+            }
+            ProtoValue::Fixed64(v) => {
+                let display = protobuf::format_fixed64(*v);
+                let is_double = display.contains('.');
+                let mut spans = vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(
+                        field.number.to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(display, Style::default().fg(Color::Magenta)),
+                ];
+                if is_double {
+                    spans.push(Span::styled(
+                        " (double)",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+            ProtoValue::Fixed32(v) => {
+                let display = protobuf::format_fixed32(*v);
+                let is_float = display.contains('.');
+                let mut spans = vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(
+                        field.number.to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(display, Style::default().fg(Color::Magenta)),
+                ];
+                if is_float {
+                    spans.push(Span::styled(
+                        " (float)",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+            ProtoValue::String(s) => {
+                lines.push(Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(
+                        field.number.to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("\"{}\"", truncate_string(s, 200)),
+                        Style::default().fg(Color::Green),
+                    ),
+                ]));
+            }
+            ProtoValue::Message(sub_fields) => {
+                lines.push(Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(
+                        field.number.to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(" {", Style::default().fg(Color::DarkGray)),
+                ]));
+                render_proto_fields(sub_fields, depth + 1, max_lines, lines);
+                if lines.len() < max_lines {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.clone()),
+                        Span::styled("}", Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+            }
+            ProtoValue::Bytes(data) => {
+                lines.push(Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(
+                        field.number.to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("<{} bytes>", data.len()),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+            }
+        }
+    }
+}
+
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
+    }
+}
+
 fn simple_url_decode(input: &str) -> String {
     let mut result = Vec::new();
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(
                 std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
                 16,
             ) {
@@ -238,7 +459,6 @@ fn simple_url_decode(input: &str) -> String {
                 i += 3;
                 continue;
             }
-        }
         if bytes[i] == b'+' {
             result.push(b' ');
         } else {

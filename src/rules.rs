@@ -86,7 +86,7 @@ pub type SharedRules = Arc<RwLock<Vec<Rule>>>;
 pub fn apply_request_rules(
     rules: &SharedRules,
     uri: &mut String,
-    headers: &mut Vec<(String, String)>,
+    headers: &mut [(String, String)],
     body: &mut Bytes,
 ) {
     let rules = rules.read().unwrap();
@@ -103,7 +103,7 @@ pub fn apply_request_rules(
 
 pub fn apply_response_rules(
     rules: &SharedRules,
-    headers: &mut Vec<(String, String)>,
+    headers: &mut [(String, String)],
     body: &mut Bytes,
 ) {
     let rules = rules.read().unwrap();
@@ -121,7 +121,7 @@ pub fn apply_response_rules(
 fn apply_rule(
     rule: &Rule,
     uri: Option<&mut String>,
-    headers: &mut Vec<(String, String)>,
+    headers: &mut [(String, String)],
     body: &mut Bytes,
 ) {
     if rule.match_pattern.is_empty() {
@@ -130,11 +130,10 @@ fn apply_rule(
 
     let scope = rule.scope;
 
-    if let Some(uri) = uri {
-        if scope == RuleScope::Url || scope == RuleScope::All {
+    if let Some(uri) = uri
+        && (scope == RuleScope::Url || scope == RuleScope::All) {
             *uri = replace_in_str(uri, &rule.match_pattern, &rule.replacement, rule.is_regex);
         }
-    }
 
     if scope == RuleScope::Headers || scope == RuleScope::All {
         for (_key, value) in headers.iter_mut() {
@@ -142,14 +141,13 @@ fn apply_rule(
         }
     }
 
-    if scope == RuleScope::Body || scope == RuleScope::All {
-        if let Ok(text) = std::str::from_utf8(body) {
+    if (scope == RuleScope::Body || scope == RuleScope::All)
+        && let Ok(text) = std::str::from_utf8(body) {
             let replaced = replace_in_str(text, &rule.match_pattern, &rule.replacement, rule.is_regex);
             if replaced != text {
                 *body = Bytes::from(replaced);
             }
         }
-    }
 }
 
 fn replace_in_str(input: &str, pattern: &str, replacement: &str, is_regex: bool) -> String {

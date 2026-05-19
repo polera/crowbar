@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
@@ -593,20 +593,18 @@ impl App {
                 }
             }
             KeyCode::Char('c') => {
-                if entry_count > 0 {
-                    if let Some(entry) = filtered.get(self.history_selected) {
+                if entry_count > 0
+                    && let Some(entry) = filtered.get(self.history_selected) {
                         let curl = crate::http::export::to_curl(entry);
                         self.export_to_file("curl", "sh", &curl);
                     }
-                }
             }
             KeyCode::Char('w') => {
-                if entry_count > 0 {
-                    if let Some(entry) = filtered.get(self.history_selected) {
+                if entry_count > 0
+                    && let Some(entry) = filtered.get(self.history_selected) {
                         let raw = crate::http::export::to_raw(entry);
                         self.export_to_file("raw", "txt", &raw);
                     }
-                }
             }
             KeyCode::Char('h') => {
                 if !self.history_detail_open {
@@ -616,15 +614,14 @@ impl App {
                 }
             }
             KeyCode::Char('m') => {
-                if entry_count > 0 {
-                    if let Some(entry) = filtered.get(self.history_selected) {
+                if entry_count > 0
+                    && let Some(entry) = filtered.get(self.history_selected) {
                         self.macro_steps.push(SequenceStep::new(entry.request.clone()));
                         self.status_message = Some((
                             format!("Added to macro ({} steps)", self.macro_steps.len()),
                             std::time::Instant::now(),
                         ));
                     }
-                }
             }
             _ => {}
         }
@@ -1153,6 +1150,7 @@ impl App {
             headers: Vec::new(),
             body: bytes::Bytes::new(),
             is_tls: false,
+            is_grpc: false,
             timestamp: std::time::SystemTime::now(),
         });
 
@@ -1250,6 +1248,12 @@ impl App {
             ProxyToUi::WebSocketFrame(id, msg) => {
                 self.store.push_ws_message(id, msg);
             }
+            ProxyToUi::GrpcFrame(id, msg) => {
+                self.store.push_grpc_message(id, msg);
+            }
+            ProxyToUi::GrpcTrailers(id, trailers) => {
+                self.store.update_trailers(id, trailers);
+            }
             ProxyToUi::MacroResponse(step_idx, resp) => {
                 if step_idx < self.macro_steps.len() {
                     self.macro_steps[step_idx].response = Some(resp);
@@ -1346,8 +1350,8 @@ impl App {
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
-        if let Some((msg, when)) = &self.status_message {
-            if when.elapsed() < std::time::Duration::from_secs(3) {
+        if let Some((msg, when)) = &self.status_message
+            && when.elapsed() < std::time::Duration::from_secs(3) {
                 let line = Line::from(Span::styled(
                     format!(" {} ", msg),
                     Style::default().fg(Color::Yellow),
@@ -1355,7 +1359,6 @@ impl App {
                 frame.render_widget(Paragraph::new(line), area);
                 return;
             }
-        }
 
         let total = self.store.len();
         let complete = self
@@ -1615,8 +1618,8 @@ fn url_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(
                 &input[i + 1..i + 3],
                 16,
             ) {
@@ -1624,7 +1627,6 @@ fn url_decode(input: &str) -> String {
                 i += 3;
                 continue;
             }
-        }
         if bytes[i] == b'+' {
             result.push(b' ');
         } else {
@@ -1641,7 +1643,7 @@ fn hex_encode(input: &[u8]) -> String {
 
 fn hex_decode(input: &str) -> Result<Vec<u8>, String> {
     let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err("Odd number of hex characters".into());
     }
     (0..cleaned.len())

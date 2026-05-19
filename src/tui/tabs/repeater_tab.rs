@@ -1,5 +1,5 @@
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
@@ -214,6 +214,30 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 .map(|(_, v)| v.as_str());
             lines.extend(body_view::body_lines(&resp.body, content_type, 500));
+        }
+
+        if !resp.trailers.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "──── Trailers ────",
+                Style::default().fg(Color::DarkGray),
+            ));
+            for (key, value) in &resp.trailers {
+                let value_style = if key == "grpc-status" {
+                    if value == "0" {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::Red)
+                    }
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(key, Style::default().fg(Color::Cyan)),
+                    Span::raw(": "),
+                    Span::styled(value, value_style),
+                ]));
+            }
         }
 
         Text::from(lines)
@@ -431,6 +455,21 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 .map(|(_, v)| v.as_str());
             lines.extend(body_view::body_lines(&resp.body, ct, 100));
+        }
+
+        if !resp.trailers.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "──── Trailers ────",
+                Style::default().fg(Color::DarkGray),
+            ));
+            for (key, value) in &resp.trailers {
+                lines.push(Line::from(vec![
+                    Span::styled(key, Style::default().fg(Color::Cyan)),
+                    Span::raw(": "),
+                    Span::raw(value),
+                ]));
+            }
         }
     } else if let Some(ref err) = step.error {
         lines.push(Line::raw(""));
