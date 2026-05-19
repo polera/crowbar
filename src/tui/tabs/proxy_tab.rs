@@ -220,6 +220,8 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw("edit  "),
             Span::styled(" b ", key_style()),
             Span::raw("bind  "),
+            Span::styled(" C ", key_style()),
+            Span::raw("cert  "),
             Span::styled(" j/k ", key_style()),
             Span::raw("scroll"),
         ])

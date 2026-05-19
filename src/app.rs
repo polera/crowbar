@@ -91,6 +91,11 @@ pub struct App {
     pub editing_bind_addr: bool,
     pub bind_addr_buffer: String,
     pub pending_rebind: Option<SocketAddr>,
+
+    // Certificate info overlay
+    pub show_cert_info: bool,
+    pub cert_export_editing: bool,
+    pub cert_export_buffer: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +198,9 @@ impl App {
             editing_bind_addr: false,
             bind_addr_buffer: String::new(),
             pending_rebind: None,
+            show_cert_info: false,
+            cert_export_editing: false,
+            cert_export_buffer: String::new(),
         }
     }
 
@@ -208,6 +216,11 @@ impl App {
 
             if self.show_help {
                 self.show_help = false;
+                return;
+            }
+
+            if self.show_cert_info {
+                self.handle_cert_overlay_key(key);
                 return;
             }
 
@@ -380,6 +393,11 @@ impl App {
                 self.bind_addr_buffer = self.bind_addr.to_string();
                 self.editing_bind_addr = true;
             }
+            KeyCode::Char('C') => {
+                self.show_cert_info = true;
+                self.cert_export_editing = false;
+                self.cert_export_buffer.clear();
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.intercept_scroll = self.intercept_scroll.saturating_sub(1);
             }
@@ -424,6 +442,99 @@ impl App {
                 self.bind_addr_buffer.pop();
             }
             _ => {}
+        }
+    }
+
+    fn handle_cert_overlay_key(&mut self, key: KeyEvent) {
+        if self.cert_export_editing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.cert_export_editing = false;
+                    self.cert_export_buffer.clear();
+                }
+                KeyCode::Enter => {
+                    let path = self.cert_export_buffer.trim().to_string();
+                    self.cert_export_editing = false;
+                    self.cert_export_buffer.clear();
+                    self.show_cert_info = false;
+                    self.export_ca_cert(Some(&path));
+                }
+                KeyCode::Char(c) => {
+                    self.cert_export_buffer.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.cert_export_buffer.pop();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.show_cert_info = false;
+            }
+            KeyCode::Char('s') => {
+                self.show_cert_info = false;
+                self.export_ca_cert(None);
+            }
+            KeyCode::Char('p') => {
+                self.cert_export_editing = true;
+                self.cert_export_buffer = String::from("crowbar-ca.pem");
+            }
+            _ => {}
+        }
+    }
+
+    fn export_ca_cert(&mut self, path: Option<&str>) {
+        let ca_dir = match dirs::home_dir() {
+            Some(h) => h.join(".crowbar"),
+            None => {
+                self.status_message = Some((
+                    "Cannot find home directory".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
+        };
+        let cert_path = ca_dir.join("ca.pem");
+
+        if !cert_path.exists() {
+            self.status_message = Some((
+                "No CA certificate found — restart crowbar to generate one".to_string(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+
+        let pem = match std::fs::read_to_string(&cert_path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status_message = Some((
+                    format!("Failed to read CA cert: {}", e),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
+        };
+
+        let dest = path.unwrap_or("crowbar-ca.pem");
+        match std::fs::write(dest, &pem) {
+            Ok(_) => {
+                let abs = std::path::Path::new(dest)
+                    .canonicalize()
+                    .unwrap_or_else(|_| std::path::PathBuf::from(dest));
+                self.status_message = Some((
+                    format!("CA certificate exported to {}", abs.display()),
+                    std::time::Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.status_message = Some((
+                    format!("Export failed: {}", e),
+                    std::time::Instant::now(),
+                ));
+            }
         }
     }
 
@@ -1176,6 +1287,10 @@ impl App {
         if self.show_help {
             self.render_help_overlay(frame);
         }
+
+        if self.show_cert_info {
+            self.render_cert_overlay(frame);
+        }
     }
 
     fn render_tab_bar(&self, frame: &mut Frame, area: Rect) {
@@ -1308,6 +1423,95 @@ impl App {
         frame.render_widget(Paragraph::new(status), area);
     }
 
+    fn render_cert_overlay(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let width = 72.min(area.width.saturating_sub(4));
+        let height = 22.min(area.height.saturating_sub(4));
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = (area.height.saturating_sub(height)) / 2;
+        let popup = Rect::new(x, y, width, height);
+
+        let key = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(Color::DarkGray);
+        let section = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let path_style = Style::default().fg(Color::Green);
+
+        let cert_path = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".crowbar")
+            .join("ca.pem");
+        let cert_display = cert_path.display().to_string();
+
+        let mut lines = vec![
+            Line::from(Span::styled("CA Certificate", section)),
+            Line::raw(""),
+            Line::from(vec![
+                Span::raw("  Location: "),
+                Span::styled(&cert_display, path_style),
+            ]),
+            Line::raw(""),
+            Line::from(Span::styled("Install in OS/Browser Trust Store", section)),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("  macOS:  ", key),
+                Span::raw("security add-trusted-cert -d -r trustRoot \\"),
+            ]),
+            Line::from(Span::raw(format!(
+                "            -k ~/Library/Keychains/login.keychain-db {}",
+                cert_display
+            ))),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("  Linux:  ", key),
+                Span::raw(format!(
+                    "sudo cp {} /usr/local/share/ca-certificates/crowbar.crt",
+                    cert_display
+                )),
+            ]),
+            Line::from(Span::raw(
+                "            && sudo update-ca-certificates",
+            )),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("  Firefox:", key),
+                Span::raw(" Settings > Privacy & Security > Certificates > Import"),
+            ]),
+            Line::raw(""),
+            Line::from(Span::styled("Export", section)),
+            Line::raw(""),
+        ];
+
+        if self.cert_export_editing {
+            lines.push(Line::from(vec![
+                Span::raw("  Save to: "),
+                Span::styled(&self.cert_export_buffer, Style::default().fg(Color::White)),
+                Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
+                Span::styled("  (Enter to confirm, Esc to cancel)", dim),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("  s ", key),
+                Span::raw("Quick export to ./crowbar-ca.pem    "),
+                Span::styled("  p ", key),
+                Span::raw("Export to custom path"),
+            ]));
+        }
+
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("  Esc/q to close", dim)));
+
+        frame.render_widget(Clear, popup);
+        let widget = Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" CA Certificate Export ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(widget, popup);
+    }
+
     fn render_help_overlay(&self, frame: &mut Frame) {
         let area = frame.area();
         let width = 52.min(area.width.saturating_sub(4));
@@ -1334,6 +1538,7 @@ impl App {
             Line::from(vec![Span::styled("  d              ", key), Span::raw("Drop intercepted request")]),
             Line::from(vec![Span::styled("  e              ", key), Span::raw("Edit intercepted request")]),
             Line::from(vec![Span::styled("  b              ", key), Span::raw("Change bind address")]),
+            Line::from(vec![Span::styled("  C              ", key), Span::raw("Export CA certificate")]),
             Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Scroll request")]),
             Line::raw(""),
             Line::from(Span::styled("History", section)),
