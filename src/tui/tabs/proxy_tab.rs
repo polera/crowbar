@@ -148,36 +148,22 @@ fn render_current_request(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
+    let lines = app.intercept_editor.render_lines(true);
 
-    for (i, line) in app.edit_buffer.iter().enumerate() {
-        if i == app.edit_cursor_line {
-            let before = &line[..app.edit_cursor_col.min(line.len())];
-            let cursor_char = line.get(app.edit_cursor_col..app.edit_cursor_col + 1).unwrap_or(" ");
-            let after = if app.edit_cursor_col + 1 < line.len() {
-                &line[app.edit_cursor_col + 1..]
-            } else {
-                ""
-            };
-
-            lines.push(Line::from(vec![
-                Span::raw(before.to_string()),
-                Span::styled(
-                    cursor_char.to_string(),
-                    Style::default().bg(Color::White).fg(Color::Black),
-                ),
-                Span::raw(after.to_string()),
-            ]));
+    let title = {
+        let mode_label = app.intercept_editor.mode_label();
+        if mode_label.is_empty() {
+            " Edit Request (Enter:confirm Esc:cancel) ".to_string()
         } else {
-            lines.push(Line::raw(line.clone()));
+            format!(" Edit Request ({}) (Enter:confirm Esc:cancel) ", mode_label)
         }
-    }
+    };
 
     let widget = Paragraph::new(Text::from(lines))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Edit Request (Enter:confirm Esc:cancel) ")
+                .title(title)
                 .border_style(Style::default().fg(Color::Yellow)),
         )
         .wrap(Wrap { trim: false })

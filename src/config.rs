@@ -5,6 +5,8 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use tracing::debug;
 
+use crate::editor::EditorMode;
+
 #[derive(Parser, Debug)]
 #[command(name = "crowbar", about = "TUI web security testing proxy")]
 struct Cli {
@@ -22,6 +24,9 @@ struct Cli {
 
     #[arg(short, long, help = "Load a saved session file")]
     pub load: Option<PathBuf>,
+
+    #[arg(long, help = "Editor mode: 'default' or 'vim'")]
+    pub editor_mode: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -48,6 +53,7 @@ struct FileConfig {
     bind: Option<String>,
     intercept: Option<bool>,
     scope: Option<Vec<String>>,
+    editor_mode: Option<EditorMode>,
 }
 
 #[derive(Debug)]
@@ -57,6 +63,7 @@ pub struct Config {
     pub scope: Vec<String>,
     pub load: Option<PathBuf>,
     pub command: Option<Command>,
+    pub editor_mode: EditorMode,
 }
 
 impl Config {
@@ -111,12 +118,23 @@ impl Config {
             file_config.scope.unwrap_or_default()
         };
 
+        let cli_editor_mode = cli.editor_mode.and_then(|s| match s.to_lowercase().as_str() {
+            "vim" => Some(EditorMode::Vim),
+            "default" => Some(EditorMode::Default),
+            _ => None,
+        });
+
+        let editor_mode = cli_editor_mode
+            .or(file_config.editor_mode)
+            .unwrap_or_default();
+
         Config {
             bind: cli.bind.or(file_bind).unwrap_or(default_bind),
             intercept: cli.intercept || file_config.intercept.unwrap_or(false),
             scope,
             load: cli.load,
             command: cli.command,
+            editor_mode,
         }
     }
 }

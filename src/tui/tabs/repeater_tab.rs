@@ -40,7 +40,9 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_request_editor(app: &App, frame: &mut Frame, area: Rect) {
-    if app.repeater_lines.is_empty() {
+    let has_content = app.repeater_editor.has_content();
+
+    if !has_content {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Request ");
@@ -62,12 +64,23 @@ fn render_request_editor(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let mut lines: Vec<Line> = Vec::new();
+    let gw = app.repeater_editor.gutter_width();
+    let num_style = Style::default().fg(Color::DarkGray);
 
-    for (i, line) in app.repeater_lines.iter().enumerate() {
-        if app.repeater_editing && i == app.repeater_cursor_line {
-            let col = app.repeater_cursor_col.min(line.len());
+    for (i, line) in app.repeater_editor.lines.iter().enumerate() {
+        let num_span = Span::styled(
+            format!("{:>width$} ", i + 1, width = gw),
+            num_style,
+        );
+
+        if app.repeater_editing && i == app.repeater_editor.cursor_line {
+            let col = app.repeater_editor.cursor_col.min(line.len());
             let before = &line[..col];
-            let cursor_char = line.get(col..col + 1).unwrap_or(" ");
+            let cursor_char = if col < line.len() {
+                &line[col..col + 1]
+            } else {
+                " "
+            };
             let after = if col + 1 < line.len() {
                 &line[col + 1..]
             } else {
@@ -75,6 +88,7 @@ fn render_request_editor(app: &App, frame: &mut Frame, area: Rect) {
             };
 
             lines.push(Line::from(vec![
+                num_span,
                 Span::raw(before.to_string()),
                 Span::styled(
                     cursor_char.to_string(),
@@ -86,28 +100,35 @@ fn render_request_editor(app: &App, frame: &mut Frame, area: Rect) {
                 let parts: Vec<&str> = line.splitn(3, ' ').collect();
                 if parts.len() >= 2 {
                     lines.push(Line::from(vec![
+                        num_span,
                         Span::styled(parts[0], Style::default().fg(Color::Green).bold()),
                         Span::raw(" "),
                         Span::raw(parts[1..].join(" ")),
                     ]));
                 } else {
-                    lines.push(Line::raw(line.clone()));
+                    lines.push(Line::from(vec![num_span, Span::raw(line.clone())]));
                 }
             } else if let Some((key, value)) = line.split_once(':') {
                 lines.push(Line::from(vec![
+                    num_span,
                     Span::styled(key, Style::default().fg(Color::Cyan)),
                     Span::raw(":"),
                     Span::raw(value),
                 ]));
             } else {
-                lines.push(Line::raw(line.clone()));
+                lines.push(Line::from(vec![num_span, Span::raw(line.clone())]));
             }
     }
 
     let title = if app.repeater_editing {
-        " Request (editing) "
+        let mode_label = app.repeater_editor.mode_label();
+        if mode_label.is_empty() {
+            " Request (editing) ".to_string()
+        } else {
+            format!(" Request ({}) ", mode_label)
+        }
     } else {
-        " Request "
+        " Request ".to_string()
     };
 
     let widget = Paragraph::new(Text::from(lines))
@@ -129,7 +150,7 @@ fn render_diff(app: &App, frame: &mut Frame, area: Rect) {
         None => vec![],
     };
 
-    let lines = diff_view::diff_lines(&original_lines, &app.repeater_lines);
+    let lines = diff_view::diff_lines(&original_lines, &app.repeater_editor.lines);
 
     let widget = Paragraph::new(Text::from(lines))
         .block(
@@ -261,7 +282,7 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
-    let has_request = !app.repeater_lines.is_empty();
+    let has_request = app.repeater_editor.has_content();
 
     let actions = if app.repeater_editing {
         Line::from(vec![

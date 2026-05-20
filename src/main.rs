@@ -1,6 +1,7 @@
 mod app;
 mod channel;
 mod config;
+mod editor;
 mod event;
 mod http;
 mod proxy;
@@ -114,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut tui = terminal::init()?;
-    let mut app = App::new(bind_addr, intercept.clone(), scope.clone(), rules.clone(), app_tx);
+    let mut app = App::new(bind_addr, intercept.clone(), scope.clone(), rules.clone(), app_tx, config.editor_mode);
     app.proxy_running = proxy_running;
     if !proxy_running {
         app.status_message = Some((

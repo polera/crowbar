@@ -61,36 +61,19 @@ fn render_input(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let title = if app.tools_editing {
-        " Input (editing) "
+        let mode_label = app.tools_editor.mode_label();
+        if mode_label.is_empty() {
+            " Input (editing) ".to_string()
+        } else {
+            format!(" Input ({}) ", mode_label)
+        }
     } else {
-        " Input "
+        " Input ".to_string()
     };
 
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, line) in app.tools_input.iter().enumerate() {
-        if app.tools_editing && i == app.tools_cursor_line {
-            let col = app.tools_cursor_col.min(line.len());
-            let before = &line[..col];
-            let cursor_char = line.get(col..col + 1).unwrap_or(" ");
-            let after = if col + 1 < line.len() {
-                &line[col + 1..]
-            } else {
-                ""
-            };
-            lines.push(Line::from(vec![
-                Span::raw(before.to_string()),
-                Span::styled(
-                    cursor_char.to_string(),
-                    Style::default().bg(Color::White).fg(Color::Black),
-                ),
-                Span::raw(after.to_string()),
-            ]));
-        } else {
-            lines.push(Line::raw(line.clone()));
-        }
-    }
+    let mut lines: Vec<Line> = app.tools_editor.render_lines(app.tools_editing);
 
-    if lines.is_empty() || (lines.len() == 1 && app.tools_input[0].is_empty() && !app.tools_editing) {
+    if lines.is_empty() || (lines.len() == 1 && app.tools_editor.lines[0].is_empty() && !app.tools_editing) {
         lines = vec![Line::styled(
             "Press 'e' to edit input",
             Style::default().fg(Color::DarkGray),

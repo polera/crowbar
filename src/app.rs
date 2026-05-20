@@ -11,6 +11,7 @@ use ratatui::Frame;
 use tokio::sync::mpsc;
 
 use crate::channel::ProxyToUi;
+use crate::editor::{EditorAction, EditorMode, TextEditor};
 use crate::http::codec;
 use crate::http::models::{EntryState, RequestData, RequestId, ResponseData};
 use crate::http::sequence::{SequenceStep, StepState};
@@ -46,19 +47,15 @@ pub struct App {
     pub intercept_queue: VecDeque<RequestData>,
     pub intercept_scroll: u16,
     pub editing_intercept: bool,
-    pub edit_buffer: Vec<String>,
-    pub edit_cursor_line: usize,
-    pub edit_cursor_col: usize,
+    pub intercept_editor: TextEditor,
 
     // Repeater tab state
-    pub repeater_lines: Vec<String>,
     pub repeater_original: Option<RequestData>,
     pub repeater_response: Option<ResponseData>,
     pub repeater_error: Option<String>,
     pub repeater_pending: bool,
     pub repeater_editing: bool,
-    pub repeater_cursor_line: usize,
-    pub repeater_cursor_col: usize,
+    pub repeater_editor: TextEditor,
     pub repeater_req_scroll: u16,
     pub repeater_resp_scroll: u16,
     pub repeater_show_diff: bool,
@@ -81,11 +78,12 @@ pub struct App {
 
     // Tools tab state
     pub tools_mode: ToolsMode,
-    pub tools_input: Vec<String>,
+    pub tools_editor: TextEditor,
     pub tools_editing: bool,
-    pub tools_cursor_line: usize,
-    pub tools_cursor_col: usize,
     pub tools_scroll: u16,
+
+    // Editor mode
+    pub editor_mode: EditorMode,
 
     // Proxy state
     pub proxy_running: bool,
@@ -150,6 +148,7 @@ impl App {
         scope: Arc<Scope>,
         rules: SharedRules,
         ui_tx: mpsc::UnboundedSender<ProxyToUi>,
+        editor_mode: EditorMode,
     ) -> Self {
         Self {
             active_tab: Tab::History,
@@ -167,17 +166,13 @@ impl App {
             intercept_queue: VecDeque::new(),
             intercept_scroll: 0,
             editing_intercept: false,
-            edit_buffer: Vec::new(),
-            edit_cursor_line: 0,
-            edit_cursor_col: 0,
-            repeater_lines: Vec::new(),
+            intercept_editor: TextEditor::new(vec![], editor_mode),
             repeater_original: None,
             repeater_response: None,
             repeater_error: None,
             repeater_pending: false,
             repeater_editing: false,
-            repeater_cursor_line: 0,
-            repeater_cursor_col: 0,
+            repeater_editor: TextEditor::new(vec![], editor_mode),
             repeater_req_scroll: 0,
             repeater_resp_scroll: 0,
             repeater_show_diff: false,
@@ -193,11 +188,10 @@ impl App {
             rules_editing_field: None,
             rules_edit_buffer: String::new(),
             tools_mode: ToolsMode::UrlEncode,
-            tools_input: vec![String::new()],
+            tools_editor: TextEditor::new(vec![String::new()], editor_mode),
             tools_editing: false,
-            tools_cursor_line: 0,
-            tools_cursor_col: 0,
             tools_scroll: 0,
+            editor_mode,
             proxy_running: true,
             editing_bind_addr: false,
             bind_addr_buffer: String::new(),
@@ -320,6 +314,17 @@ impl App {
                 self.save_session();
                 true
             }
+            (_, KeyCode::F(2)) => {
+                self.editor_mode = self.editor_mode.toggle();
+                self.tools_editor.set_mode(self.editor_mode);
+                self.intercept_editor.set_mode(self.editor_mode);
+                self.repeater_editor.set_mode(self.editor_mode);
+                self.status_message = Some((
+                    format!("Editor mode: {}", self.editor_mode.label()),
+                    std::time::Instant::now(),
+                ));
+                true
+            }
             _ => false,
         }
     }
@@ -386,9 +391,7 @@ impl App {
             }
             KeyCode::Char('e') => {
                 if let Some(req) = self.intercept_queue.front() {
-                    self.edit_buffer = codec::request_to_lines(req);
-                    self.edit_cursor_line = 0;
-                    self.edit_cursor_col = 0;
+                    self.intercept_editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
                     self.editing_intercept = true;
                     self.intercept_scroll = 0;
                 }
@@ -771,8 +774,11 @@ impl App {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Char('e')) => {
                 self.tools_editing = true;
-                self.tools_cursor_line = 0;
-                self.tools_cursor_col = 0;
+                self.tools_editor.cursor_line = 0;
+                self.tools_editor.cursor_col = 0;
+                if self.editor_mode == EditorMode::Vim {
+                    self.tools_editor.vim_mode = crate::editor::VimMode::Insert;
+                }
             }
             (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l')) => {
                 self.tools_mode = self.tools_mode.next();
@@ -791,71 +797,25 @@ impl App {
     }
 
     fn handle_tools_editor_key(&mut self, key: KeyEvent) {
-        match (key.modifiers, key.code) {
-            (_, KeyCode::Esc) => {
+        match self.tools_editor.handle_key(key) {
+            EditorAction::Consumed => {}
+            EditorAction::ExitEditor => {
                 self.tools_editing = false;
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
-                self.tools_input = vec![String::new()];
-                self.tools_cursor_line = 0;
-                self.tools_cursor_col = 0;
+            EditorAction::Enter => {
+                self.tools_editor.insert_newline();
             }
-            (_, KeyCode::Enter) => {
-                let col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
-                let rest = self.tools_input[self.tools_cursor_line][col..].to_string();
-                self.tools_input[self.tools_cursor_line].truncate(col);
-                self.tools_cursor_line += 1;
-                self.tools_input.insert(self.tools_cursor_line, rest);
-                self.tools_cursor_col = 0;
-            }
-            (_, KeyCode::Char(c)) => {
-                let col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
-                self.tools_input[self.tools_cursor_line].insert(col, c);
-                self.tools_cursor_col = col + 1;
-            }
-            (_, KeyCode::Backspace) => {
-                if self.tools_cursor_col > 0 {
-                    self.tools_cursor_col -= 1;
-                    self.tools_input[self.tools_cursor_line].remove(self.tools_cursor_col);
-                } else if self.tools_cursor_line > 0 {
-                    let current = self.tools_input.remove(self.tools_cursor_line);
-                    self.tools_cursor_line -= 1;
-                    self.tools_cursor_col = self.tools_input[self.tools_cursor_line].len();
-                    self.tools_input[self.tools_cursor_line].push_str(&current);
+            EditorAction::CtrlEnter => {}
+            EditorAction::Custom(k) => {
+                if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('u') {
+                    self.tools_editor.clear();
                 }
             }
-            (_, KeyCode::Up)
-                if self.tools_cursor_line > 0 => {
-                    self.tools_cursor_line -= 1;
-                    self.tools_cursor_col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
-                }
-            (_, KeyCode::Down)
-                if self.tools_cursor_line + 1 < self.tools_input.len() => {
-                    self.tools_cursor_line += 1;
-                    self.tools_cursor_col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
-                }
-            (_, KeyCode::Left)
-                if self.tools_cursor_col > 0 => {
-                    self.tools_cursor_col -= 1;
-                }
-            (_, KeyCode::Right) => {
-                let len = self.tools_input[self.tools_cursor_line].len();
-                if self.tools_cursor_col < len {
-                    self.tools_cursor_col += 1;
-                }
-            }
-            (_, KeyCode::Home) => {
-                self.tools_cursor_col = 0;
-            }
-            (_, KeyCode::End) => {
-                self.tools_cursor_col = self.tools_input[self.tools_cursor_line].len();
-            }
-            _ => {}
         }
     }
 
     pub fn tools_input_text(&self) -> String {
-        self.tools_input.join("\n")
+        self.tools_editor.lines.join("\n")
     }
 
     pub fn tools_output(&self) -> String {
@@ -914,10 +874,13 @@ impl App {
                 }
             }
             (KeyModifiers::NONE, KeyCode::Char('e'))
-                if !self.repeater_lines.is_empty() => {
+                if self.repeater_editor.has_content() => {
                     self.repeater_editing = true;
-                    self.repeater_cursor_line = 0;
-                    self.repeater_cursor_col = 0;
+                    self.repeater_editor.cursor_line = 0;
+                    self.repeater_editor.cursor_col = 0;
+                    if self.editor_mode == EditorMode::Vim {
+                        self.repeater_editor.vim_mode = crate::editor::VimMode::Insert;
+                    }
                 }
             (KeyModifiers::NONE, KeyCode::Char('d'))
                 if !self.macro_show && self.repeater_original.is_some() => {
@@ -967,31 +930,55 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent, target: EditorTarget) {
-        let (lines, cursor_line, cursor_col) = match target {
-            EditorTarget::Intercept => (
-                &mut self.edit_buffer,
-                &mut self.edit_cursor_line,
-                &mut self.edit_cursor_col,
-            ),
-            EditorTarget::Repeater => (
-                &mut self.repeater_lines,
-                &mut self.repeater_cursor_line,
-                &mut self.repeater_cursor_col,
-            ),
+        let editor = match target {
+            EditorTarget::Intercept => &mut self.intercept_editor,
+            EditorTarget::Repeater => &mut self.repeater_editor,
         };
 
-        match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Enter) => {
+        let action = editor.handle_key(key);
+
+        match action {
+            EditorAction::Consumed => {}
+            EditorAction::ExitEditor => {
+                match target {
+                    EditorTarget::Intercept => {
+                        self.editing_intercept = false;
+                        self.intercept_editor = TextEditor::new(vec![], self.editor_mode);
+                    }
+                    EditorTarget::Repeater => {
+                        self.repeater_editing = false;
+                    }
+                }
+            }
+            EditorAction::Enter => {
                 match target {
                     EditorTarget::Intercept => {
                         if let Some(original) = self.intercept_queue.pop_front() {
                             let edited =
-                                codec::lines_to_request(&self.edit_buffer, &original);
+                                codec::lines_to_request(&self.intercept_editor.lines, &original);
                             self.intercept_state
                                 .resolve(original.id, InterceptDecision::ForwardEdited(edited));
                         }
                         self.editing_intercept = false;
-                        self.edit_buffer.clear();
+                        self.intercept_editor = TextEditor::new(vec![], self.editor_mode);
+                        self.intercept_scroll = 0;
+                    }
+                    EditorTarget::Repeater => {
+                        self.repeater_editor.insert_newline();
+                    }
+                }
+            }
+            EditorAction::CtrlEnter => {
+                match target {
+                    EditorTarget::Intercept => {
+                        if let Some(original) = self.intercept_queue.pop_front() {
+                            let edited =
+                                codec::lines_to_request(&self.intercept_editor.lines, &original);
+                            self.intercept_state
+                                .resolve(original.id, InterceptDecision::ForwardEdited(edited));
+                        }
+                        self.editing_intercept = false;
+                        self.intercept_editor = TextEditor::new(vec![], self.editor_mode);
                         self.intercept_scroll = 0;
                     }
                     EditorTarget::Repeater => {
@@ -999,103 +986,8 @@ impl App {
                         self.repeater_send();
                     }
                 }
-                return;
             }
-            (_, KeyCode::Esc) => {
-                match target {
-                    EditorTarget::Intercept => {
-                        self.editing_intercept = false;
-                        self.edit_buffer.clear();
-                    }
-                    EditorTarget::Repeater => {
-                        self.repeater_editing = false;
-                    }
-                }
-                return;
-            }
-            (_, KeyCode::Enter) => {
-                match target {
-                    EditorTarget::Intercept => {
-                        if let Some(original) = self.intercept_queue.pop_front() {
-                            let edited =
-                                codec::lines_to_request(&self.edit_buffer, &original);
-                            self.intercept_state
-                                .resolve(original.id, InterceptDecision::ForwardEdited(edited));
-                        }
-                        self.editing_intercept = false;
-                        self.edit_buffer.clear();
-                        self.intercept_scroll = 0;
-                    }
-                    EditorTarget::Repeater => {
-                        // In repeater editor, Enter inserts a newline
-                        let col = (*cursor_col).min(lines[*cursor_line].len());
-                        let rest = lines[*cursor_line][col..].to_string();
-                        lines[*cursor_line].truncate(col);
-                        *cursor_line += 1;
-                        lines.insert(*cursor_line, rest);
-                        *cursor_col = 0;
-                    }
-                }
-                return;
-            }
-            _ => {}
-        }
-
-        match key.code {
-            KeyCode::Up
-                if *cursor_line > 0 => {
-                    *cursor_line -= 1;
-                    *cursor_col = (*cursor_col).min(lines[*cursor_line].len());
-                }
-            KeyCode::Down
-                if *cursor_line + 1 < lines.len() => {
-                    *cursor_line += 1;
-                    *cursor_col = (*cursor_col).min(lines[*cursor_line].len());
-                }
-            KeyCode::Left
-                if *cursor_col > 0 => {
-                    *cursor_col -= 1;
-                }
-            KeyCode::Right => {
-                let line_len = lines[*cursor_line].len();
-                if *cursor_col < line_len {
-                    *cursor_col += 1;
-                }
-            }
-            KeyCode::Home => {
-                *cursor_col = 0;
-            }
-            KeyCode::End => {
-                *cursor_col = lines[*cursor_line].len();
-            }
-            KeyCode::Char(c)
-                if *cursor_line < lines.len() => {
-                    let col = (*cursor_col).min(lines[*cursor_line].len());
-                    lines[*cursor_line].insert(col, c);
-                    *cursor_col = col + 1;
-                }
-            KeyCode::Backspace => {
-                if *cursor_col > 0 && *cursor_line < lines.len() {
-                    *cursor_col -= 1;
-                    lines[*cursor_line].remove(*cursor_col);
-                } else if *cursor_col == 0 && *cursor_line > 0 {
-                    let current = lines.remove(*cursor_line);
-                    *cursor_line -= 1;
-                    *cursor_col = lines[*cursor_line].len();
-                    lines[*cursor_line].push_str(&current);
-                }
-            }
-            KeyCode::Delete
-                if *cursor_line < lines.len() => {
-                    let line_len = lines[*cursor_line].len();
-                    if *cursor_col < line_len {
-                        lines[*cursor_line].remove(*cursor_col);
-                    } else if *cursor_line + 1 < lines.len() {
-                        let next = lines.remove(*cursor_line + 1);
-                        lines[*cursor_line].push_str(&next);
-                    }
-                }
-            _ => {}
+            EditorAction::Custom(_) => {}
         }
     }
 
@@ -1103,14 +995,12 @@ impl App {
         let filtered = self.store.filtered_entries(&self.history_filter);
         if let Some(entry) = filtered.get(self.history_selected) {
             let req = &entry.request;
-            self.repeater_lines = codec::request_to_lines(req);
+            self.repeater_editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
             self.repeater_original = Some(req.clone());
             self.repeater_response = None;
             self.repeater_error = None;
             self.repeater_pending = false;
             self.repeater_editing = false;
-            self.repeater_cursor_line = 0;
-            self.repeater_cursor_col = 0;
             self.repeater_req_scroll = 0;
             self.repeater_resp_scroll = 0;
             self.active_tab = Tab::Repeater;
@@ -1118,7 +1008,7 @@ impl App {
     }
 
     fn repeater_send(&mut self) {
-        if self.repeater_lines.is_empty() || self.repeater_pending {
+        if self.repeater_editor.lines.is_empty() || self.repeater_pending {
             return;
         }
 
@@ -1135,7 +1025,7 @@ impl App {
             timestamp: std::time::SystemTime::now(),
         });
 
-        let request = codec::lines_to_request(&self.repeater_lines, &original);
+        let request = codec::lines_to_request(&self.repeater_editor.lines, &original);
         self.repeater_original = Some(request.clone());
         self.repeater_pending = true;
         self.repeater_response = None;
@@ -1382,10 +1272,36 @@ impl App {
             )
         };
 
+        let editor_mode_span = if self.editor_mode == EditorMode::Vim {
+            let active_editing = self.tools_editing || self.editing_intercept || self.repeater_editing;
+            if active_editing {
+                let editor = if self.tools_editing {
+                    &self.tools_editor
+                } else if self.editing_intercept {
+                    &self.intercept_editor
+                } else {
+                    &self.repeater_editor
+                };
+                let (label, bg) = match editor.vim_mode {
+                    crate::editor::VimMode::Normal => ("NORMAL", Color::Blue),
+                    crate::editor::VimMode::Insert => ("INSERT", Color::Green),
+                };
+                Span::styled(
+                    format!(" {} ", label),
+                    Style::default().bg(bg).fg(Color::Black).bold(),
+                )
+            } else {
+                Span::styled(" VIM ", Style::default().fg(Color::DarkGray))
+            }
+        } else {
+            Span::raw("")
+        };
+
         let status = Line::from(vec![
             intercept_span,
             Span::raw(format!(" {} ", self.bind_addr)),
             scope_span,
+            editor_mode_span,
             Span::raw("| "),
             Span::styled(
                 format!("{} requests", total),
@@ -1504,7 +1420,7 @@ impl App {
     fn render_help_overlay(&self, frame: &mut Frame) {
         let area = frame.area();
         let width = 52.min(area.width.saturating_sub(4));
-        let height = 30.min(area.height.saturating_sub(4));
+        let height = 38.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(width)) / 2;
         let y = (area.height.saturating_sub(height)) / 2;
         let popup = Rect::new(x, y, width, height);
@@ -1555,6 +1471,16 @@ impl App {
             Line::from(vec![Span::styled("  Enter          ", key), Span::raw("Toggle enabled")]),
             Line::from(vec![Span::styled("  n/p/e          ", key), Span::raw("Edit name / pattern / replacement")]),
             Line::from(vec![Span::styled("  t/s/R          ", key), Span::raw("Cycle target / scope / regex")]),
+            Line::raw(""),
+            Line::from(Span::styled("Editor", section)),
+            Line::from(vec![Span::styled("  F2             ", key), Span::raw("Toggle vim/default mode")]),
+            Line::from(vec![Span::styled("  Ctrl+Home/End  ", key), Span::raw("Jump to start/end of input")]),
+            Line::from(vec![Span::styled("  Vim: Esc       ", key), Span::raw("Normal mode / exit edit")]),
+            Line::from(vec![Span::styled("  Vim: i/a/o     ", key), Span::raw("Enter insert mode")]),
+            Line::from(vec![Span::styled("  Vim: hjkl      ", key), Span::raw("Movement (normal mode)")]),
+            Line::from(vec![Span::styled("  Vim: gg/G      ", key), Span::raw("Jump to start/end of input")]),
+            Line::from(vec![Span::styled("  Vim: w/b       ", key), Span::raw("Word forward/backward")]),
+            Line::from(vec![Span::styled("  Vim: dd/x/u    ", key), Span::raw("Delete line/char, undo")]),
             Line::raw(""),
             Line::from(Span::styled("Press any key to close", dim)),
         ];
