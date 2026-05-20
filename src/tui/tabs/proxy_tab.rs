@@ -17,7 +17,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
     render_status_line(app, frame, chunks[0]);
 
-    if app.editing_intercept {
+    if app.intercept_ui.editing {
         render_editor(app, frame, chunks[1]);
     } else {
         render_current_request(app, frame, chunks[1]);
@@ -60,7 +60,7 @@ fn render_status_line(app: &App, frame: &mut Frame, area: Rect) {
         )
     };
 
-    let queue_count = app.intercept_queue.len();
+    let queue_count = app.intercept_ui.queue.len();
     let queue_text = if queue_count > 0 {
         format!("  {} request{} queued", queue_count, if queue_count == 1 { "" } else { "s" })
     } else {
@@ -82,7 +82,7 @@ fn render_status_line(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_current_request(app: &App, frame: &mut Frame, area: Rect) {
-    let content = if let Some(req) = app.intercept_queue.front() {
+    let content = if let Some(req) = app.intercept_ui.queue.front() {
         let mut lines: Vec<Line> = Vec::new();
 
         lines.push(Line::from(vec![
@@ -142,16 +142,16 @@ fn render_current_request(app: &App, frame: &mut Frame, area: Rect) {
                 .title(" Current Request "),
         )
         .wrap(Wrap { trim: false })
-        .scroll((app.intercept_scroll, 0));
+        .scroll((app.intercept_ui.scroll, 0));
 
     frame.render_widget(widget, area);
 }
 
 fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
-    let lines = app.intercept_editor.render_lines(true);
+    let lines = app.intercept_ui.editor.render_lines(true);
 
     let title = {
-        let mode_label = app.intercept_editor.mode_label();
+        let mode_label = app.intercept_ui.editor.mode_label();
         if mode_label.is_empty() {
             " Edit Request (Enter:confirm Esc:cancel) ".to_string()
         } else {
@@ -167,15 +167,15 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
                 .border_style(Style::default().fg(Color::Yellow)),
         )
         .wrap(Wrap { trim: false })
-        .scroll((app.intercept_scroll, 0));
+        .scroll((app.intercept_ui.scroll, 0));
 
     frame.render_widget(widget, area);
 }
 
 fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
-    let has_request = !app.intercept_queue.is_empty();
+    let has_request = !app.intercept_ui.queue.is_empty();
 
-    let actions = if app.editing_intercept || app.editing_bind_addr {
+    let actions = if app.intercept_ui.editing || app.editing_bind_addr {
         Line::from(vec![
             Span::styled(" Enter ", Style::default().fg(Color::Green).bold()),
             Span::raw("confirm  "),

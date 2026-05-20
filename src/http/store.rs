@@ -4,6 +4,7 @@ use crate::scanning::Finding;
 
 use super::models::{EntryState, GrpcMessage, HistoryEntry, RequestData, RequestId, ResponseData, WsMessage};
 
+#[derive(Default)]
 pub struct InMemoryStore {
     entries: Vec<HistoryEntry>,
     index: HashMap<RequestId, usize>,
@@ -11,10 +12,7 @@ pub struct InMemoryStore {
 
 impl InMemoryStore {
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            index: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn insert(&mut self, request: RequestData) {
@@ -118,5 +116,9 @@ impl InMemoryStore {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }

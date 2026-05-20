@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use base64::Engine;
 use serde_json::json;
 
@@ -17,8 +19,7 @@ pub fn to_curl(entry: &HistoryEntry) -> String {
     parts.push(format!("curl -X {} '{}'", req.method, url));
 
     for (key, value) in &req.headers {
-        let k = key.to_lowercase();
-        if k == "host" || k == "content-length" {
+        if key.eq_ignore_ascii_case("host") || key.eq_ignore_ascii_case("content-length") {
             continue;
         }
         parts.push(format!("  -H '{}: {}'", key, value.replace('\'', "'\\''")));
@@ -44,10 +45,10 @@ pub fn to_raw(entry: &HistoryEntry) -> String {
     let req = &entry.request;
 
     let path = extract_path(&req.uri);
-    output.push_str(&format!("{} {} {}\r\n", req.method, path, req.version));
+    let _ = write!(output, "{} {} {}\r\n", req.method, path, req.version);
 
     for (key, value) in &req.headers {
-        output.push_str(&format!("{}: {}\r\n", key, value));
+        let _ = write!(output, "{}: {}\r\n", key, value);
     }
     output.push_str("\r\n");
 
@@ -55,16 +56,16 @@ pub fn to_raw(entry: &HistoryEntry) -> String {
         if let Ok(text) = std::str::from_utf8(&req.body) {
             output.push_str(text);
         } else {
-            output.push_str(&format!("[binary: {} bytes]", req.body.len()));
+            let _ = write!(output, "[binary: {} bytes]", req.body.len());
         }
     }
 
     if let Some(resp) = &entry.response {
         output.push_str("\r\n---\r\n\r\n");
-        output.push_str(&format!("{} {} {}\r\n", resp.version, resp.status, resp.reason));
+        let _ = write!(output, "{} {} {}\r\n", resp.version, resp.status, resp.reason);
 
         for (key, value) in &resp.headers {
-            output.push_str(&format!("{}: {}\r\n", key, value));
+            let _ = write!(output, "{}: {}\r\n", key, value);
         }
         output.push_str("\r\n");
 
@@ -72,7 +73,7 @@ pub fn to_raw(entry: &HistoryEntry) -> String {
             if let Ok(text) = std::str::from_utf8(&resp.body) {
                 output.push_str(text);
             } else {
-                output.push_str(&format!("[binary: {} bytes]", resp.body.len()));
+                let _ = write!(output, "[binary: {} bytes]", resp.body.len());
             }
         }
     }
@@ -243,17 +244,9 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+    super::is_leap(y)
 }
 
 fn extract_path(uri: &str) -> &str {
-    if let Some(pos) = uri.find("://") {
-        let after_scheme = &uri[pos + 3..];
-        after_scheme
-            .find('/')
-            .map(|i| &after_scheme[i..])
-            .unwrap_or("/")
-    } else {
-        uri
-    }
+    super::extract_path(uri)
 }

@@ -25,11 +25,11 @@ impl CertCache {
         let mut cache = self.cache.lock().await;
 
         if let Some(key) = cache.get(hostname) {
-            return Ok(key.clone());
+            return Ok(Arc::clone(key));
         }
 
         let certified_key = Arc::new(cert_gen::generate_leaf_cert(hostname, &self.ca)?);
-        cache.put(hostname.to_string(), certified_key.clone());
+        cache.put(hostname.to_string(), Arc::clone(&certified_key));
 
         Ok(certified_key)
     }

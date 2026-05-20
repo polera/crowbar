@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, IsCa, KeyPair,
@@ -59,7 +59,7 @@ impl CertificateAuthority {
         })
     }
 
-    fn load_from_disk(cert_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<Self> {
+    fn load_from_disk(cert_path: &Path, key_path: &Path) -> anyhow::Result<Self> {
         let key_pem = std::fs::read_to_string(key_path)?;
         let ca_key = KeyPair::from_pem(&key_pem)?;
 
@@ -83,7 +83,7 @@ impl CertificateAuthority {
         })
     }
 
-    fn save_to_disk(&self, cert_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<()> {
+    fn save_to_disk(&self, cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
         std::fs::write(cert_path, &self.ca_cert_pem)?;
         std::fs::write(key_path, self.ca_key.serialize_pem())?;
         Ok(())

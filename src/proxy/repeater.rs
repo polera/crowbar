@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -6,7 +5,6 @@ use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http1::Builder as ClientBuilder;
 use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
@@ -78,11 +76,11 @@ async fn send_http(request: &RequestData) -> anyhow::Result<ResponseData> {
         }
     });
 
-    let path = extract_path(&request.uri);
+    let path = crate::http::extract_path(&request.uri);
 
     let mut req = Request::builder()
         .method(request.method.as_str())
-        .uri(&path);
+        .uri(path);
 
     for (key, value) in &request.headers {
         req = req.header(key.as_str(), value.as_str());
@@ -99,17 +97,10 @@ async fn send_https(request: &RequestData) -> anyhow::Result<ResponseData> {
     let port = extract_port(&request.uri).unwrap_or(443);
     let addr = format!("{}:{}", host, port);
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let client_config = Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth(),
-    );
+    let client_config = crate::tls::build_tls_client_config();
 
     let tcp = TcpStream::connect(&addr).await?;
-    let server_name = ServerName::try_from(host.clone())
-        .unwrap_or_else(|_| ServerName::try_from("localhost".to_string()).unwrap());
+    let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
     let tls_stream = connector.connect(server_name, tcp).await?;
 
@@ -126,11 +117,11 @@ async fn send_https(request: &RequestData) -> anyhow::Result<ResponseData> {
         }
     });
 
-    let path = extract_path(&request.uri);
+    let path = crate::http::extract_path(&request.uri);
 
     let mut req = Request::builder()
         .method(request.method.as_str())
-        .uri(&path);
+        .uri(path);
 
     for (key, value) in &request.headers {
         req = req.header(key.as_str(), value.as_str());
@@ -147,17 +138,10 @@ async fn send_h2(request: &RequestData) -> anyhow::Result<ResponseData> {
     let port = extract_port(&request.uri).unwrap_or(443);
     let addr = format!("{}:{}", host, port);
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    client_config.alpn_protocols = vec![b"h2".to_vec()];
-    let client_config = Arc::new(client_config);
+    let client_config = crate::tls::build_tls_h2_client_config();
 
     let tcp = TcpStream::connect(&addr).await?;
-    let server_name = ServerName::try_from(host.clone())
-        .unwrap_or_else(|_| ServerName::try_from("localhost".to_string()).unwrap());
+    let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
     let tls_stream = connector.connect(server_name, tcp).await?;
 
@@ -173,7 +157,7 @@ async fn send_h2(request: &RequestData) -> anyhow::Result<ResponseData> {
         }
     });
 
-    let path = extract_path(&request.uri);
+    let path = crate::http::extract_path(&request.uri);
     let upstream_uri = if port == 443 {
         format!("https://{}{}", host, path)
     } else {
@@ -198,26 +182,14 @@ async fn parse_response(
     resp: hyper::Response<hyper::body::Incoming>,
 ) -> anyhow::Result<ResponseData> {
     let status = resp.status().as_u16();
-    let version = match resp.version() {
-        hyper::Version::HTTP_10 => HttpVersion::Http10,
-        hyper::Version::HTTP_11 => HttpVersion::Http11,
-        hyper::Version::HTTP_2 => HttpVersion::Http2,
-        _ => HttpVersion::Http11,
-    };
-    let headers: Vec<(String, String)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-        .collect();
+    let version = resp.version().into();
+    let headers = crate::http::models::extract_headers(resp.headers());
 
     let body = resp.collect().await?.to_bytes();
 
     Ok(ResponseData {
         status,
-        reason: http::StatusCode::from_u16(status)
-            .map(|s| s.canonical_reason().unwrap_or(""))
-            .unwrap_or("")
-            .to_string(),
+        reason: crate::http::models::status_reason(status),
         version,
         headers,
         body,
@@ -230,11 +202,7 @@ async fn parse_h2_response(
     resp: hyper::Response<hyper::body::Incoming>,
 ) -> anyhow::Result<ResponseData> {
     let status = resp.status().as_u16();
-    let headers: Vec<(String, String)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-        .collect();
+    let headers = crate::http::models::extract_headers(resp.headers());
 
     let collected = resp.into_body().collect().await?;
     let trailers_hm = collected.trailers().cloned();
@@ -256,29 +224,13 @@ async fn parse_h2_response(
 
     Ok(ResponseData {
         status,
-        reason: http::StatusCode::from_u16(status)
-            .map(|s| s.canonical_reason().unwrap_or(""))
-            .unwrap_or("")
-            .to_string(),
+        reason: crate::http::models::status_reason(status),
         version: HttpVersion::Http2,
         headers,
         body: resp_body,
         trailers,
         duration: std::time::Duration::ZERO,
     })
-}
-
-fn extract_path(uri: &str) -> String {
-    if let Some(pos) = uri.find("://") {
-        let after_scheme = &uri[pos + 3..];
-        if let Some(slash) = after_scheme.find('/') {
-            return after_scheme[slash..].to_string();
-        }
-    }
-    if uri.starts_with('/') {
-        return uri.to_string();
-    }
-    "/".to_string()
 }
 
 fn extract_port(uri: &str) -> Option<u16> {

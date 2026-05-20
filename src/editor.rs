@@ -49,7 +49,7 @@ pub struct TextEditor {
     pub mode: EditorMode,
     pub vim_mode: VimMode,
     pending_key: Option<char>,
-    undo_stack: Vec<(Vec<String>, usize, usize)>,
+    undo_stack: std::collections::VecDeque<(Vec<String>, usize, usize)>,
 }
 
 impl TextEditor {
@@ -66,7 +66,7 @@ impl TextEditor {
             mode,
             vim_mode: VimMode::Normal,
             pending_key: None,
-            undo_stack: Vec::new(),
+            undo_stack: std::collections::VecDeque::new(),
         }
     }
 
@@ -174,72 +174,28 @@ impl TextEditor {
     // --- Default mode ---
 
     fn handle_default_key(&mut self, key: KeyEvent) -> EditorAction {
-        match (key.modifiers, key.code) {
-            (_, KeyCode::Esc) => EditorAction::ExitEditor,
-            (_, KeyCode::Enter) => EditorAction::Enter,
-            (_, KeyCode::Char(c)) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.save_undo();
-                let col = self.cursor_col.min(self.current_line_len());
-                self.lines[self.cursor_line].insert(col, c);
-                self.cursor_col = col + 1;
-                EditorAction::Consumed
-            }
-            (_, KeyCode::Backspace) => {
-                self.handle_backspace();
-                EditorAction::Consumed
-            }
-            (_, KeyCode::Delete) => {
-                self.handle_delete();
-                EditorAction::Consumed
-            }
-            (_, KeyCode::Up) => {
-                self.move_up();
-                EditorAction::Consumed
-            }
-            (_, KeyCode::Down) => {
-                self.move_down();
-                EditorAction::Consumed
-            }
-            (_, KeyCode::Left) => {
-                self.move_left();
-                EditorAction::Consumed
-            }
-            (_, KeyCode::Right) => {
-                self.move_right();
-                EditorAction::Consumed
-            }
-            (KeyModifiers::CONTROL, KeyCode::Home) => {
-                self.cursor_line = 0;
-                self.cursor_col = 0;
-                EditorAction::Consumed
-            }
-            (KeyModifiers::CONTROL, KeyCode::End) => {
-                self.cursor_line = self.lines.len().saturating_sub(1);
-                self.cursor_col = self.current_line_len();
-                EditorAction::Consumed
-            }
-            (_, KeyCode::Home) => {
-                self.cursor_col = 0;
-                EditorAction::Consumed
-            }
-            (_, KeyCode::End) => {
-                self.cursor_col = self.current_line_len();
-                EditorAction::Consumed
-            }
-            _ => EditorAction::Custom(key),
+        if key.code == KeyCode::Esc {
+            return EditorAction::ExitEditor;
         }
+        self.handle_editing_key(key)
     }
 
     // --- Vim insert mode ---
 
     fn handle_vim_insert_key(&mut self, key: KeyEvent) -> EditorAction {
+        if key.code == KeyCode::Esc {
+            self.vim_mode = VimMode::Normal;
+            self.clamp_cursor_normal();
+            self.pending_key = None;
+            return EditorAction::Consumed;
+        }
+        self.handle_editing_key(key)
+    }
+
+    // --- Shared editing keys (default + vim insert) ---
+
+    fn handle_editing_key(&mut self, key: KeyEvent) -> EditorAction {
         match (key.modifiers, key.code) {
-            (_, KeyCode::Esc) => {
-                self.vim_mode = VimMode::Normal;
-                self.clamp_cursor_normal();
-                self.pending_key = None;
-                EditorAction::Consumed
-            }
             (_, KeyCode::Enter) => EditorAction::Enter,
             (_, KeyCode::Char(c)) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.save_undo();
@@ -678,9 +634,9 @@ impl TextEditor {
 
     fn save_undo(&mut self) {
         if self.undo_stack.len() >= 100 {
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
-        self.undo_stack.push((
+        self.undo_stack.push_back((
             self.lines.clone(),
             self.cursor_line,
             self.cursor_col,
@@ -688,7 +644,7 @@ impl TextEditor {
     }
 
     fn undo(&mut self) {
-        if let Some((lines, line, col)) = self.undo_stack.pop() {
+        if let Some((lines, line, col)) = self.undo_stack.pop_back() {
             self.lines = lines;
             self.cursor_line = line;
             self.cursor_col = col;

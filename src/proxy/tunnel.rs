@@ -1,6 +1,5 @@
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -13,7 +12,6 @@ use hyper::server::conn::http1::Builder as ServerBuilder;
 use hyper::service::service_fn;
 use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -21,40 +19,29 @@ use tracing::{debug, error, warn};
 
 use crate::channel::ProxyToUi;
 use crate::http::models::{GrpcDirection, GrpcMessage, HttpVersion, RequestData, RequestId, ResponseData};
-use crate::proxy::intercept::{InterceptDecision, InterceptState};
-use crate::proxy::scope::Scope;
-use crate::rules::{self, SharedRules};
-use crate::tls::cert_cache::CertCache;
+use crate::proxy::intercept::InterceptDecision;
+use crate::proxy::ProxyContext;
+use crate::rules;
 use crate::tls::cert_gen;
 
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_tunnel(
     upgraded: hyper::upgrade::Upgraded,
     host: String,
     port: u16,
-    cert_cache: Arc<CertCache>,
-    ui_tx: mpsc::UnboundedSender<ProxyToUi>,
-    intercept: Arc<InterceptState>,
-    scope: Arc<Scope>,
-    rules: SharedRules,
+    ctx: ProxyContext,
 ) {
-    if let Err(e) = run_tunnel(upgraded, &host, port, cert_cache, ui_tx, intercept, scope, rules).await {
+    if let Err(e) = run_tunnel(upgraded, &host, port, ctx).await {
         debug!("Tunnel to {}:{} ended: {}", host, port, e);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_tunnel(
     upgraded: hyper::upgrade::Upgraded,
     host: &str,
     port: u16,
-    cert_cache: Arc<CertCache>,
-    ui_tx: mpsc::UnboundedSender<ProxyToUi>,
-    intercept: Arc<InterceptState>,
-    scope: Arc<Scope>,
-    rules: SharedRules,
+    ctx: ProxyContext,
 ) -> anyhow::Result<()> {
-    let certified_key = cert_cache.get_or_generate(host).await?;
+    let certified_key = ctx.cert_cache.get_or_generate(host).await?;
     let server_config = cert_gen::build_server_config(certified_key)?;
     let acceptor = TlsAcceptor::from(server_config);
 
@@ -69,9 +56,9 @@ async fn run_tunnel(
 
     if is_h2 {
         debug!("Client negotiated h2 for {}:{}", host, port);
-        run_h2_tunnel(tls_stream, host, port, ui_tx, intercept, scope, rules).await
+        run_h2_tunnel(tls_stream, host, port, ctx).await
     } else {
-        run_h1_tunnel(tls_stream, host, port, ui_tx, intercept, scope, rules).await
+        run_h1_tunnel(tls_stream, host, port, ctx).await
     }
 }
 
@@ -79,20 +66,14 @@ async fn run_h1_tunnel(
     tls_stream: tokio_rustls::server::TlsStream<TokioIo<hyper::upgrade::Upgraded>>,
     host: &str,
     port: u16,
-    ui_tx: mpsc::UnboundedSender<ProxyToUi>,
-    intercept: Arc<InterceptState>,
-    scope: Arc<Scope>,
-    rules: SharedRules,
+    ctx: ProxyContext,
 ) -> anyhow::Result<()> {
     let host = host.to_string();
 
     let svc = service_fn(move |req: Request<Incoming>| {
         let host = host.clone();
-        let ui_tx = ui_tx.clone();
-        let intercept = intercept.clone();
-        let scope = scope.clone();
-        let rules = rules.clone();
-        async move { handle_inner_request(req, &host, port, &ui_tx, &intercept, &scope, &rules).await }
+        let ctx = ctx.clone();
+        async move { handle_inner_request(req, &host, port, &ctx).await }
     });
 
     ServerBuilder::new()
@@ -116,33 +97,25 @@ async fn handle_inner_request(
     req: Request<Incoming>,
     host: &str,
     port: u16,
-    ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
-    intercept: &InterceptState,
-    scope: &Scope,
-    rules: &SharedRules,
+    ctx: &ProxyContext,
 ) -> Result<hyper::Response<Full<Bytes>>, hyper::Error> {
     if is_websocket_upgrade(&req) {
-        return handle_websocket_upgrade(req, host, port, ui_tx, scope).await;
+        return handle_websocket_upgrade(req, host, port, ctx).await;
     }
 
-    handle_http_request(req, host, port, ui_tx, intercept, scope, rules).await
+    handle_http_request(req, host, port, ctx).await
 }
 
 async fn handle_websocket_upgrade(
     req: Request<Incoming>,
     host: &str,
     port: u16,
-    ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
-    scope: &Scope,
+    ctx: &ProxyContext,
 ) -> Result<hyper::Response<Full<Bytes>>, hyper::Error> {
-    let in_scope = scope.is_in_scope(host);
+    let in_scope = ctx.scope.is_in_scope(host);
     let request_id = RequestId::next();
 
-    let headers: Vec<(String, String)> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-        .collect();
+    let headers = crate::http::models::extract_headers(req.headers());
 
     let full_uri = format!(
         "wss://{}{}",
@@ -167,23 +140,17 @@ async fn handle_websocket_upgrade(
     };
 
     if in_scope {
-        let _ = ui_tx.send(ProxyToUi::RequestCaptured(request_data));
+        let _ = ctx.ui_tx.send(ProxyToUi::RequestCaptured(request_data));
     }
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let client_config = Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth(),
-    );
+    let client_config = crate::tls::build_tls_client_config();
 
     let addr = format!("{}:{}", host, port);
     let tcp = match TcpStream::connect(&addr).await {
         Ok(s) => s,
         Err(e) => {
             warn!("WebSocket: failed to connect to upstream {}: {}", addr, e);
-            let _ = ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
                 request_id,
                 format!("Connection failed: {}", e),
             ));
@@ -191,15 +158,13 @@ async fn handle_websocket_upgrade(
         }
     };
 
-    let server_name = ServerName::try_from(host.to_string())
-        .map_err(|_| ())
-        .unwrap_or_else(|_| ServerName::try_from("localhost".to_string()).unwrap());
+    let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
     let tls_stream = match connector.connect(server_name, tcp).await {
         Ok(s) => s,
         Err(e) => {
             warn!("WebSocket: TLS handshake failed with {}: {}", addr, e);
-            let _ = ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
                 request_id,
                 format!("TLS handshake failed: {}", e),
             ));
@@ -259,11 +224,7 @@ async fn handle_websocket_upgrade(
     let resp_status = upstream_resp.status().as_u16();
 
     if resp_status != 101 {
-        let resp_headers: Vec<(String, String)> = upstream_resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-            .collect();
+        let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
         let resp_body = upstream_resp
             .collect()
             .await
@@ -277,11 +238,7 @@ async fn handle_websocket_upgrade(
         return Ok(response.body(Full::new(resp_body)).unwrap());
     }
 
-    let resp_headers: Vec<(String, String)> = upstream_resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-        .collect();
+    let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
 
     let response_data = ResponseData {
         status: 101,
@@ -293,10 +250,10 @@ async fn handle_websocket_upgrade(
         duration: std::time::Duration::ZERO,
     };
     if in_scope {
-        let _ = ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+        let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
     }
 
-    let ui_tx_clone = ui_tx.clone();
+    let ui_tx_clone = ctx.ui_tx.clone();
     let host_owned = host.to_string();
 
     tokio::spawn(async move {
@@ -340,28 +297,16 @@ async fn handle_http_request(
     req: Request<Incoming>,
     host: &str,
     port: u16,
-    ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
-    intercept: &InterceptState,
-    scope: &Scope,
-    rules: &SharedRules,
+    ctx: &ProxyContext,
 ) -> Result<hyper::Response<Full<Bytes>>, hyper::Error> {
-    let in_scope = scope.is_in_scope(host);
+    let in_scope = ctx.scope.is_in_scope(host);
     let request_id = RequestId::next();
     let start = Instant::now();
 
     let method = req.method().clone();
-    let version = match req.version() {
-        hyper::Version::HTTP_10 => HttpVersion::Http10,
-        hyper::Version::HTTP_11 => HttpVersion::Http11,
-        hyper::Version::HTTP_2 => HttpVersion::Http2,
-        _ => HttpVersion::Http11,
-    };
+    let version = req.version().into();
 
-    let headers: Vec<(String, String)> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-        .collect();
+    let headers = crate::http::models::extract_headers(req.headers());
 
     let (parts, body) = req.into_parts();
     let body_bytes = match body.collect().await {
@@ -396,9 +341,9 @@ async fn handle_http_request(
     };
 
     if in_scope {
-        let _ = ui_tx.send(ProxyToUi::RequestCaptured(request_data.clone()));
+        let _ = ctx.ui_tx.send(ProxyToUi::RequestCaptured(request_data.clone()));
 
-        if let Some(rx) = intercept.intercept_request(&request_data, ui_tx) {
+        if let Some(rx) = ctx.intercept.intercept_request(&request_data, &ctx.ui_tx) {
             match rx.await {
                 Ok(InterceptDecision::Drop) => {
                     return Ok(hyper::Response::builder()
@@ -416,26 +361,20 @@ async fn handle_http_request(
     }
 
     rules::apply_request_rules(
-        rules,
+        &ctx.rules,
         &mut request_data.uri,
         &mut request_data.headers,
         &mut request_data.body,
     );
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let client_config = Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth(),
-    );
+    let client_config = crate::tls::build_tls_client_config();
 
     let addr = format!("{}:{}", host, port);
     let tcp = match TcpStream::connect(&addr).await {
         Ok(s) => s,
         Err(e) => {
             warn!("Failed to connect to upstream {}: {}", addr, e);
-            let _ = ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
                 request_id,
                 format!("Connection failed: {}", e),
             ));
@@ -443,15 +382,13 @@ async fn handle_http_request(
         }
     };
 
-    let server_name = ServerName::try_from(host.to_string())
-        .map_err(|_| ())
-        .unwrap_or_else(|_| ServerName::try_from("localhost".to_string()).unwrap());
+    let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
     let tls_stream = match connector.connect(server_name, tcp).await {
         Ok(s) => s,
         Err(e) => {
             warn!("TLS handshake failed with {}: {}", addr, e);
-            let _ = ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
                 request_id,
                 format!("TLS handshake failed: {}", e),
             ));
@@ -469,7 +406,7 @@ async fn handle_http_request(
         Ok(pair) => pair,
         Err(e) => {
             warn!("Upstream HTTP handshake failed: {}", e);
-            let _ = ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
                 request_id,
                 format!("HTTP handshake failed: {}", e),
             ));
@@ -509,7 +446,7 @@ async fn handle_http_request(
         Ok(resp) => resp,
         Err(e) => {
             warn!("Upstream request to {} failed: {}", addr, e);
-            let _ = ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
                 request_id,
                 format!("Request failed: {}", e),
             ));
@@ -518,17 +455,8 @@ async fn handle_http_request(
     };
 
     let resp_status = upstream_resp.status().as_u16();
-    let resp_version = match upstream_resp.version() {
-        hyper::Version::HTTP_10 => HttpVersion::Http10,
-        hyper::Version::HTTP_11 => HttpVersion::Http11,
-        hyper::Version::HTTP_2 => HttpVersion::Http2,
-        _ => HttpVersion::Http11,
-    };
-    let mut resp_headers: Vec<(String, String)> = upstream_resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-        .collect();
+    let resp_version = upstream_resp.version().into();
+    let mut resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
 
     let mut resp_body = match upstream_resp.collect().await {
         Ok(b) => b.to_bytes(),
@@ -539,14 +467,11 @@ async fn handle_http_request(
     };
     let duration = start.elapsed();
 
-    rules::apply_response_rules(rules, &mut resp_headers, &mut resp_body);
+    rules::apply_response_rules(&ctx.rules, &mut resp_headers, &mut resp_body);
 
     let response_data = ResponseData {
         status: resp_status,
-        reason: http::StatusCode::from_u16(resp_status)
-            .map(|s| s.canonical_reason().unwrap_or(""))
-            .unwrap_or("")
-            .to_string(),
+        reason: crate::http::models::status_reason(resp_status),
         version: resp_version,
         headers: resp_headers.clone(),
         body: resp_body.clone(),
@@ -555,7 +480,7 @@ async fn handle_http_request(
     };
 
     if in_scope {
-        let _ = ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+        let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
     }
 
     let mut response = hyper::Response::builder().status(resp_status);
@@ -734,10 +659,7 @@ async fn run_h2_tunnel(
     tls_stream: tokio_rustls::server::TlsStream<TokioIo<hyper::upgrade::Upgraded>>,
     host: &str,
     port: u16,
-    ui_tx: mpsc::UnboundedSender<ProxyToUi>,
-    intercept: Arc<InterceptState>,
-    scope: Arc<Scope>,
-    rules: SharedRules,
+    ctx: ProxyContext,
 ) -> anyhow::Result<()> {
     let upstream_sender = match establish_h2_upstream(host, port).await {
         Ok(s) => s,
@@ -750,13 +672,10 @@ async fn run_h2_tunnel(
     let host = host.to_string();
     let svc = service_fn(move |req: Request<Incoming>| {
         let host = host.clone();
-        let ui_tx = ui_tx.clone();
-        let intercept = intercept.clone();
-        let scope = scope.clone();
-        let rules = rules.clone();
+        let ctx = ctx.clone();
         let sender = upstream_sender.clone();
         async move {
-            handle_h2_request(req, &host, port, &ui_tx, &intercept, &scope, &rules, sender).await
+            handle_h2_request(req, &host, port, &ctx, sender).await
         }
     });
 
@@ -771,19 +690,12 @@ async fn establish_h2_upstream(
     host: &str,
     port: u16,
 ) -> anyhow::Result<hyper::client::conn::http2::SendRequest<Full<Bytes>>> {
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    client_config.alpn_protocols = vec![b"h2".to_vec()];
-    let client_config = Arc::new(client_config);
+    let client_config = crate::tls::build_tls_h2_client_config();
 
     let addr = format!("{}:{}", host, port);
     let tcp = TcpStream::connect(&addr).await?;
 
-    let server_name = ServerName::try_from(host.to_string())
-        .unwrap_or_else(|_| ServerName::try_from("localhost".to_string()).unwrap());
+    let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
     let tls_stream = connector.connect(server_name, tcp).await?;
 
@@ -801,29 +713,21 @@ async fn establish_h2_upstream(
     Ok(sender)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_h2_request(
     req: Request<Incoming>,
     host: &str,
     port: u16,
-    ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
-    intercept: &InterceptState,
-    scope: &Scope,
-    rules: &SharedRules,
+    ctx: &ProxyContext,
     mut upstream: hyper::client::conn::http2::SendRequest<Full<Bytes>>,
 ) -> Result<hyper::Response<H2RespBody>, Infallible> {
-    let in_scope = scope.is_in_scope(host);
+    let in_scope = ctx.scope.is_in_scope(host);
     let request_id = RequestId::next();
     let start = Instant::now();
 
     let is_grpc = is_grpc_request(&req);
     let method = req.method().clone();
 
-    let headers: Vec<(String, String)> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-        .collect();
+    let headers = crate::http::models::extract_headers(req.headers());
 
     let (parts, body) = req.into_parts();
     let body_bytes = match body.collect().await {
@@ -858,13 +762,13 @@ async fn handle_h2_request(
     if in_scope {
         if is_grpc && !body_bytes.is_empty() {
             let mut buf = BytesMut::from(body_bytes.as_ref());
-            extract_grpc_messages(&mut buf, request_id, GrpcDirection::ClientToServer, ui_tx);
+            extract_grpc_messages(&mut buf, request_id, GrpcDirection::ClientToServer, &ctx.ui_tx);
         }
 
-        let _ = ui_tx.send(ProxyToUi::RequestCaptured(request_data.clone()));
+        let _ = ctx.ui_tx.send(ProxyToUi::RequestCaptured(request_data.clone()));
 
         if !is_grpc
-            && let Some(rx) = intercept.intercept_request(&request_data, ui_tx) {
+            && let Some(rx) = ctx.intercept.intercept_request(&request_data, &ctx.ui_tx) {
                 match rx.await {
                     Ok(InterceptDecision::Drop) => {
                         return Ok(hyper::Response::builder()
@@ -886,7 +790,7 @@ async fn handle_h2_request(
 
     if !is_grpc {
         rules::apply_request_rules(
-            rules,
+            &ctx.rules,
             &mut request_data.uri,
             &mut request_data.headers,
             &mut request_data.body,
@@ -931,7 +835,7 @@ async fn handle_h2_request(
         Ok(resp) => resp,
         Err(e) => {
             warn!("H2 upstream request to {}:{} failed: {}", host, port, e);
-            let _ = ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
                 request_id,
                 format!("Request failed: {}", e),
             ));
@@ -940,11 +844,7 @@ async fn handle_h2_request(
     };
 
     let resp_status = upstream_resp.status().as_u16();
-    let resp_headers: Vec<(String, String)> = upstream_resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-        .collect();
+    let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
 
     if is_grpc {
         let duration = start.elapsed();
@@ -952,17 +852,14 @@ async fn handle_h2_request(
         if in_scope {
             let response_data = ResponseData {
                 status: resp_status,
-                reason: http::StatusCode::from_u16(resp_status)
-                    .map(|s| s.canonical_reason().unwrap_or(""))
-                    .unwrap_or("")
-                    .to_string(),
+                reason: crate::http::models::status_reason(resp_status),
                 version: HttpVersion::Http2,
                 headers: resp_headers.clone(),
                 body: Bytes::new(),
                 trailers: Vec::new(),
                 duration,
             };
-            let _ = ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+            let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
         }
 
         let (_, resp_body_incoming) = upstream_resp.into_parts();
@@ -970,7 +867,7 @@ async fn handle_h2_request(
             inner: resp_body_incoming,
             request_id,
             direction: GrpcDirection::ServerToClient,
-            ui_tx: ui_tx.clone(),
+            ui_tx: ctx.ui_tx.clone(),
             buffer: BytesMut::new(),
             in_scope,
         };
@@ -987,7 +884,7 @@ async fn handle_h2_request(
         Ok(c) => c,
         Err(e) => {
             error!("Failed to read h2 upstream response body: {}", e);
-            let _ = ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
                 request_id,
                 format!("Response body error: {}", e),
             ));
@@ -1009,14 +906,11 @@ async fn handle_h2_request(
         .unwrap_or_default();
 
     let mut resp_headers_mut = resp_headers;
-    rules::apply_response_rules(rules, &mut resp_headers_mut, &mut resp_body);
+    rules::apply_response_rules(&ctx.rules, &mut resp_headers_mut, &mut resp_body);
 
     let response_data = ResponseData {
         status: resp_status,
-        reason: http::StatusCode::from_u16(resp_status)
-            .map(|s| s.canonical_reason().unwrap_or(""))
-            .unwrap_or("")
-            .to_string(),
+        reason: crate::http::models::status_reason(resp_status),
         version: HttpVersion::Http2,
         headers: resp_headers_mut.clone(),
         body: resp_body.clone(),
@@ -1025,7 +919,7 @@ async fn handle_h2_request(
     };
 
     if in_scope {
-        let _ = ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+        let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
     }
 
     let mut response = hyper::Response::builder().status(resp_status);

@@ -55,7 +55,7 @@ fn render_table(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, area
                 Style::default().fg(Color::DarkGray)
             };
 
-            let row_style = if i == app.rules_selected {
+            let row_style = if i == app.rules_ui.selected {
                 Style::default()
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD)
@@ -94,10 +94,10 @@ fn render_table(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, area
 }
 
 fn render_detail(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, area: Rect) {
-    if app.rules_selected >= rules.len() {
+    if app.rules_ui.selected >= rules.len() {
         return;
     }
-    let rule = &rules[app.rules_selected];
+    let rule = &rules[app.rules_ui.selected];
 
     let name_style = field_style(app, RuleField::Name);
     let pattern_style = field_style(app, RuleField::Pattern);
@@ -132,14 +132,14 @@ fn render_detail(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, are
         ]),
     ];
 
-    let editing_title = match app.rules_editing_field {
+    let editing_title = match app.rules_ui.editing_field {
         Some(RuleField::Name) => " Detail (editing name) ",
         Some(RuleField::Pattern) => " Detail (editing pattern) ",
         Some(RuleField::Replacement) => " Detail (editing replacement) ",
         None => " Detail ",
     };
 
-    let border_style = if app.rules_editing_field.is_some() {
+    let border_style = if app.rules_ui.editing_field.is_some() {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default()
@@ -192,7 +192,7 @@ fn render_actions(_app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn field_style(app: &App, field: RuleField) -> Style {
-    if app.rules_editing_field == Some(field) {
+    if app.rules_ui.editing_field == Some(field) {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default()
@@ -200,8 +200,8 @@ fn field_style(app: &App, field: RuleField) -> Style {
 }
 
 fn field_value(app: &App, field: RuleField, current: &str) -> String {
-    if app.rules_editing_field == Some(field) {
-        format!("{}|", app.rules_edit_buffer)
+    if app.rules_ui.editing_field == Some(field) {
+        format!("{}|", app.rules_ui.edit_buffer)
     } else if current.is_empty() {
         "(empty)".to_string()
     } else {

@@ -30,7 +30,7 @@ fn render_mode_selector(app: &App, frame: &mut Frame, area: Rect) {
         .iter()
         .enumerate()
         .flat_map(|(i, mode)| {
-            let style = if *mode == app.tools_mode {
+            let style = if *mode == app.tools.mode {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
@@ -54,14 +54,14 @@ fn render_mode_selector(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_input(app: &App, frame: &mut Frame, area: Rect) {
-    let border_style = if app.tools_editing {
+    let border_style = if app.tools.editing {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default()
     };
 
-    let title = if app.tools_editing {
-        let mode_label = app.tools_editor.mode_label();
+    let title = if app.tools.editing {
+        let mode_label = app.tools.editor.mode_label();
         if mode_label.is_empty() {
             " Input (editing) ".to_string()
         } else {
@@ -71,9 +71,9 @@ fn render_input(app: &App, frame: &mut Frame, area: Rect) {
         " Input ".to_string()
     };
 
-    let mut lines: Vec<Line> = app.tools_editor.render_lines(app.tools_editing);
+    let mut lines: Vec<Line> = app.tools.editor.render_lines(app.tools.editing);
 
-    if lines.is_empty() || (lines.len() == 1 && app.tools_editor.lines[0].is_empty() && !app.tools_editing) {
+    if lines.is_empty() || (lines.len() == 1 && app.tools.editor.lines[0].is_empty() && !app.tools.editing) {
         lines = vec![Line::styled(
             "Press 'e' to edit input",
             Style::default().fg(Color::DarkGray),
@@ -101,7 +101,7 @@ fn render_output(app: &App, frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::DarkGray),
         )]
     } else {
-        output.lines().map(|l| Line::raw(l.to_string())).collect()
+        output.lines().map(Line::raw).collect()
     };
 
     let widget = Paragraph::new(Text::from(lines))
@@ -111,7 +111,7 @@ fn render_output(app: &App, frame: &mut Frame, area: Rect) {
                 .title(" Output "),
         )
         .wrap(Wrap { trim: false })
-        .scroll((app.tools_scroll, 0));
+        .scroll((app.tools.scroll, 0));
 
     frame.render_widget(widget, area);
 }

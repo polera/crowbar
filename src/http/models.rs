@@ -37,6 +37,31 @@ impl std::fmt::Display for HttpVersion {
     }
 }
 
+impl From<hyper::Version> for HttpVersion {
+    fn from(v: hyper::Version) -> Self {
+        match v {
+            hyper::Version::HTTP_10 => HttpVersion::Http10,
+            hyper::Version::HTTP_11 => HttpVersion::Http11,
+            hyper::Version::HTTP_2 => HttpVersion::Http2,
+            _ => HttpVersion::Http11,
+        }
+    }
+}
+
+pub fn extract_headers(headers: &hyper::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+        .collect()
+}
+
+pub fn status_reason(code: u16) -> String {
+    http::StatusCode::from_u16(code)
+        .map(|s| s.canonical_reason().unwrap_or(""))
+        .unwrap_or("")
+        .to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestData {
     pub id: RequestId,

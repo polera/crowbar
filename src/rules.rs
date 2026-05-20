@@ -90,15 +90,11 @@ pub fn apply_request_rules(
     body: &mut Bytes,
 ) {
     let rules = rules.read().unwrap();
-    for rule in rules.iter() {
-        if !rule.enabled {
-            continue;
-        }
-        if rule.target != RuleTarget::Request && rule.target != RuleTarget::Both {
-            continue;
-        }
-        apply_rule(rule, Some(uri), headers, body);
-    }
+    rules
+        .iter()
+        .filter(|r| r.enabled)
+        .filter(|r| matches!(r.target, RuleTarget::Request | RuleTarget::Both))
+        .for_each(|rule| apply_rule(rule, Some(uri), headers, body));
 }
 
 pub fn apply_response_rules(
@@ -107,15 +103,11 @@ pub fn apply_response_rules(
     body: &mut Bytes,
 ) {
     let rules = rules.read().unwrap();
-    for rule in rules.iter() {
-        if !rule.enabled {
-            continue;
-        }
-        if rule.target != RuleTarget::Response && rule.target != RuleTarget::Both {
-            continue;
-        }
-        apply_rule(rule, None, headers, body);
-    }
+    rules
+        .iter()
+        .filter(|r| r.enabled)
+        .filter(|r| matches!(r.target, RuleTarget::Response | RuleTarget::Both))
+        .for_each(|rule| apply_rule(rule, None, headers, body));
 }
 
 fn apply_rule(

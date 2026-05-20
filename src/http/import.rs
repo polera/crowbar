@@ -139,19 +139,15 @@ fn parse_iso_timestamp(s: &str) -> Option<SystemTime> {
     let date_part = s.get(..10)?;
     let time_part = s.get(11..19)?;
 
-    let parts: Vec<&str> = date_part.split('-').collect();
-    if parts.len() != 3 { return None; }
+    let mut date_iter = date_part.split('-');
+    let year: u64 = date_iter.next()?.parse().ok()?;
+    let month: u64 = date_iter.next()?.parse().ok()?;
+    let day: u64 = date_iter.next()?.parse().ok()?;
 
-    let year: u64 = parts[0].parse().ok()?;
-    let month: u64 = parts[1].parse().ok()?;
-    let day: u64 = parts[2].parse().ok()?;
-
-    let time_parts: Vec<&str> = time_part.split(':').collect();
-    if time_parts.len() != 3 { return None; }
-
-    let hour: u64 = time_parts[0].parse().ok()?;
-    let min: u64 = time_parts[1].parse().ok()?;
-    let sec: u64 = time_parts[2].parse().ok()?;
+    let mut time_iter = time_part.split(':');
+    let hour: u64 = time_iter.next()?.parse().ok()?;
+    let min: u64 = time_iter.next()?.parse().ok()?;
+    let sec: u64 = time_iter.next()?.parse().ok()?;
 
     let mut days: u64 = 0;
     for y in 1970..year {
@@ -174,7 +170,7 @@ fn parse_iso_timestamp(s: &str) -> Option<SystemTime> {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+    super::is_leap(y)
 }
 
 #[derive(Deserialize)]

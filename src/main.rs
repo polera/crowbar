@@ -25,6 +25,7 @@ use crate::event::{AppEvent, EventLoop};
 use crate::proxy::intercept::InterceptState;
 use crate::proxy::scope::Scope;
 use crate::proxy::server::ProxyServer;
+use crate::proxy::ProxyContext;
 use crate::rules::SharedRules;
 use crate::tls::ca::CertificateAuthority;
 use crate::tls::cert_cache::CertCache;
@@ -92,13 +93,16 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = bound.as_ref().map(|(_, a)| *a).unwrap_or(config.bind);
 
     if let Some((listener, _)) = bound {
+        let ctx = ProxyContext {
+            ui_tx,
+            cert_cache: cert_cache.clone(),
+            intercept: intercept.clone(),
+            scope: scope.clone(),
+            rules: rules.clone(),
+        };
         let server = ProxyServer::new(
             bind_addr,
-            ui_tx,
-            cert_cache.clone(),
-            intercept.clone(),
-            scope.clone(),
-            rules.clone(),
+            ctx,
             cancel.clone(),
         );
         tokio::spawn(async move {
@@ -176,13 +180,16 @@ async fn run_app(
                     cancel.cancel();
                     *cancel = CancellationToken::new();
 
+                    let ctx = ProxyContext {
+                        ui_tx: app.ui_tx.clone(),
+                        cert_cache: cert_cache.clone(),
+                        intercept: app.intercept_state.clone(),
+                        scope: app.scope.clone(),
+                        rules: app.rules.clone(),
+                    };
                     let server = ProxyServer::new(
                         new_addr,
-                        app.ui_tx.clone(),
-                        cert_cache.clone(),
-                        app.intercept_state.clone(),
-                        app.scope.clone(),
-                        app.rules.clone(),
+                        ctx,
                         cancel.clone(),
                     );
                     tokio::spawn(async move {
@@ -253,7 +260,7 @@ fn handle_command(cmd: crate::config::Command) -> anyhow::Result<()> {
                     .file_stem()
                     .unwrap_or_default()
                     .to_string_lossy()
-                    .to_string()
+                    .into_owned()
             });
             let path = crate::http::session::save(&entries, &session_name)?;
             eprintln!(

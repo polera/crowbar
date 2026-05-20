@@ -9,9 +9,9 @@ use crate::http::models::EntryState;
 use crate::tui::widgets::{body_view, logo};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
-    let filtered = app.store.filtered_entries(&app.history_filter);
+    let filtered = app.store.filtered_entries(&app.history.filter);
 
-    if app.store.len() == 0 {
+    if app.store.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" History ");
@@ -21,7 +21,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let has_filter = !app.history_filter.is_empty() || app.history_filtering;
+    let has_filter = !app.history.filter.is_empty() || app.history.filtering;
 
     let (filter_area, content_area) = if has_filter {
         let chunks = Layout::vertical([
@@ -38,8 +38,8 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         render_filter_bar(app, frame, filter_area, filtered.len());
     }
 
-    if app.history_detail_open {
-        let selected = filtered.get(app.history_selected);
+    if app.history.detail_open {
+        let selected = filtered.get(app.history.selected);
         let has_ws = selected.is_some_and(|e| !e.ws_messages.is_empty());
         let has_grpc = selected.is_some_and(|e| !e.grpc_messages.is_empty());
         let has_findings = selected.is_some_and(|e| !e.findings.is_empty());
@@ -87,8 +87,8 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect, match_count: usize) {
-    let cursor_indicator = if app.history_filtering { "█" } else { "" };
-    let count_text = if app.history_filter.is_empty() {
+    let cursor_indicator = if app.history.filtering { "█" } else { "" };
+    let count_text = if app.history.filter.is_empty() {
         String::new()
     } else {
         format!(" ({} matches)", match_count)
@@ -96,7 +96,7 @@ fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect, match_count: usiz
 
     let line = Line::from(vec![
         Span::styled(" /", Style::default().fg(Color::Yellow)),
-        Span::raw(&app.history_filter),
+        Span::raw(&app.history.filter),
         Span::styled(cursor_indicator, Style::default().fg(Color::Yellow)),
         Span::styled(count_text, Style::default().fg(Color::DarkGray)),
     ]);
@@ -219,7 +219,7 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
         .bg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
 
-    let help = if app.history_detail_open {
+    let help = if app.history.detail_open {
         " History (Enter/Esc:close) "
     } else {
         " History (Enter:detail j/k:nav /:filter) "
@@ -231,13 +231,13 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
         .row_highlight_style(highlight_style);
 
     let mut state = TableState::default();
-    state.select(Some(app.history_selected));
+    state.select(Some(app.history.selected));
 
     frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
-    let entry = match filtered.get(app.history_selected) {
+    let entry = match filtered.get(app.history.selected) {
         Some(e) => e,
         None => return,
     };
@@ -287,7 +287,7 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
                 .title(" Request "),
         )
         .wrap(Wrap { trim: false })
-        .scroll((app.history_scroll, 0));
+        .scroll((app.history.scroll, 0));
 
     frame.render_widget(req_paragraph, chunks[0]);
 
@@ -410,13 +410,13 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
                 .title(" Response "),
         )
         .wrap(Wrap { trim: false })
-        .scroll((app.history_scroll, 0));
+        .scroll((app.history.scroll, 0));
 
     frame.render_widget(resp_paragraph, chunks[1]);
 
     if content_height > visible_height {
         let mut scrollbar_state = ScrollbarState::new(content_height as usize)
-            .position(app.history_scroll as usize);
+            .position(app.history.scroll as usize);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
         frame.render_stateful_widget(
             scrollbar,
@@ -427,7 +427,7 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
 }
 
 fn render_findings(_app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
-    let entry = match filtered.get(_app.history_selected) {
+    let entry = match filtered.get(_app.history.selected) {
         Some(e) => e,
         None => return,
     };
@@ -464,13 +464,13 @@ fn render_findings(_app: &App, filtered: &[&crate::http::models::HistoryEntry], 
                 .title(title),
         )
         .wrap(Wrap { trim: false })
-        .scroll((_app.history_scroll, 0));
+        .scroll((_app.history.scroll, 0));
 
     frame.render_widget(widget, area);
 }
 
 fn render_ws_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
-    let entry = match filtered.get(app.history_selected) {
+    let entry = match filtered.get(app.history.selected) {
         Some(e) => e,
         None => return,
     };
@@ -537,13 +537,13 @@ fn render_ws_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry]
                 .title(title),
         )
         .wrap(Wrap { trim: false })
-        .scroll((app.history_scroll, 0));
+        .scroll((app.history.scroll, 0));
 
     frame.render_widget(widget, area);
 }
 
 fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
-    let entry = match filtered.get(app.history_selected) {
+    let entry = match filtered.get(app.history.selected) {
         Some(e) => e,
         None => return,
     };
@@ -612,7 +612,7 @@ fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntr
                 .title(title),
         )
         .wrap(Wrap { trim: false })
-        .scroll((app.history_scroll, 0));
+        .scroll((app.history.scroll, 0));
 
     frame.render_widget(widget, area);
 }

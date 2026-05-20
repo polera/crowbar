@@ -48,6 +48,6 @@ impl rustls::server::ResolvesServerCert for SingleCertResolver {
         &self,
         _client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<CertifiedKey>> {
-        Some(self.0.clone())
+        Some(Arc::clone(&self.0))
     }
 }

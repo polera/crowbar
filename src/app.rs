@@ -27,6 +27,54 @@ use crate::tui::tabs::rules_tab;
 use crate::tui::tabs::tools_tab;
 use crate::tui::tabs::Tab;
 
+pub struct HistoryState {
+    pub selected: usize,
+    pub detail_open: bool,
+    pub scroll: u16,
+    pub filter: String,
+    pub filtering: bool,
+}
+
+pub struct InterceptUiState {
+    pub queue: VecDeque<RequestData>,
+    pub scroll: u16,
+    pub editing: bool,
+    pub editor: TextEditor,
+}
+
+pub struct RepeaterState {
+    pub original: Option<RequestData>,
+    pub response: Option<ResponseData>,
+    pub error: Option<String>,
+    pub pending: bool,
+    pub editing: bool,
+    pub editor: TextEditor,
+    pub req_scroll: u16,
+    pub resp_scroll: u16,
+    pub show_diff: bool,
+}
+
+pub struct MacroState {
+    pub steps: Vec<SequenceStep>,
+    pub selected: usize,
+    pub running: bool,
+    pub show: bool,
+    pub current_step: usize,
+}
+
+pub struct RulesUiState {
+    pub selected: usize,
+    pub editing_field: Option<RuleField>,
+    pub edit_buffer: String,
+}
+
+pub struct ToolsState {
+    pub mode: ToolsMode,
+    pub editor: TextEditor,
+    pub editing: bool,
+    pub scroll: u16,
+}
+
 pub struct App {
     pub active_tab: Tab,
     pub should_quit: bool,
@@ -36,56 +84,17 @@ pub struct App {
     pub scope: Arc<Scope>,
     pub ui_tx: mpsc::UnboundedSender<ProxyToUi>,
 
-    // History tab state
-    pub history_selected: usize,
-    pub history_detail_open: bool,
-    pub history_scroll: u16,
-    pub history_filter: String,
-    pub history_filtering: bool,
-
-    // Proxy/Intercept tab state
-    pub intercept_queue: VecDeque<RequestData>,
-    pub intercept_scroll: u16,
-    pub editing_intercept: bool,
-    pub intercept_editor: TextEditor,
-
-    // Repeater tab state
-    pub repeater_original: Option<RequestData>,
-    pub repeater_response: Option<ResponseData>,
-    pub repeater_error: Option<String>,
-    pub repeater_pending: bool,
-    pub repeater_editing: bool,
-    pub repeater_editor: TextEditor,
-    pub repeater_req_scroll: u16,
-    pub repeater_resp_scroll: u16,
-    pub repeater_show_diff: bool,
-
-    // Macro/sequence state
-    pub macro_steps: Vec<SequenceStep>,
-    pub macro_selected: usize,
-    pub macro_running: bool,
-    pub macro_show: bool,
-    pub macro_current_step: usize,
+    pub history: HistoryState,
+    pub intercept_ui: InterceptUiState,
+    pub repeater: RepeaterState,
+    pub macros: MacroState,
+    pub rules_ui: RulesUiState,
+    pub tools: ToolsState,
 
     pub show_help: bool,
     pub status_message: Option<(String, std::time::Instant)>,
-
-    // Rules tab state
     pub rules: SharedRules,
-    pub rules_selected: usize,
-    pub rules_editing_field: Option<RuleField>,
-    pub rules_edit_buffer: String,
-
-    // Tools tab state
-    pub tools_mode: ToolsMode,
-    pub tools_editor: TextEditor,
-    pub tools_editing: bool,
-    pub tools_scroll: u16,
-
-    // Editor mode
     pub editor_mode: EditorMode,
-
-    // Proxy state
     pub proxy_running: bool,
 
     // Bind address editing
@@ -158,39 +167,51 @@ impl App {
             intercept_state,
             scope,
             ui_tx,
-            history_selected: 0,
-            history_detail_open: false,
-            history_scroll: 0,
-            history_filter: String::new(),
-            history_filtering: false,
-            intercept_queue: VecDeque::new(),
-            intercept_scroll: 0,
-            editing_intercept: false,
-            intercept_editor: TextEditor::new(vec![], editor_mode),
-            repeater_original: None,
-            repeater_response: None,
-            repeater_error: None,
-            repeater_pending: false,
-            repeater_editing: false,
-            repeater_editor: TextEditor::new(vec![], editor_mode),
-            repeater_req_scroll: 0,
-            repeater_resp_scroll: 0,
-            repeater_show_diff: false,
-            macro_steps: Vec::new(),
-            macro_selected: 0,
-            macro_running: false,
-            macro_show: false,
-            macro_current_step: 0,
+            history: HistoryState {
+                selected: 0,
+                detail_open: false,
+                scroll: 0,
+                filter: String::new(),
+                filtering: false,
+            },
+            intercept_ui: InterceptUiState {
+                queue: VecDeque::new(),
+                scroll: 0,
+                editing: false,
+                editor: TextEditor::new(vec![], editor_mode),
+            },
+            repeater: RepeaterState {
+                original: None,
+                response: None,
+                error: None,
+                pending: false,
+                editing: false,
+                editor: TextEditor::new(vec![], editor_mode),
+                req_scroll: 0,
+                resp_scroll: 0,
+                show_diff: false,
+            },
+            macros: MacroState {
+                steps: Vec::new(),
+                selected: 0,
+                running: false,
+                show: false,
+                current_step: 0,
+            },
             show_help: false,
             status_message: None,
             rules,
-            rules_selected: 0,
-            rules_editing_field: None,
-            rules_edit_buffer: String::new(),
-            tools_mode: ToolsMode::UrlEncode,
-            tools_editor: TextEditor::new(vec![String::new()], editor_mode),
-            tools_editing: false,
-            tools_scroll: 0,
+            rules_ui: RulesUiState {
+                selected: 0,
+                editing_field: None,
+                edit_buffer: String::new(),
+            },
+            tools: ToolsState {
+                mode: ToolsMode::UrlEncode,
+                editor: TextEditor::new(vec![String::new()], editor_mode),
+                editing: false,
+                scroll: 0,
+            },
             editor_mode,
             proxy_running: true,
             editing_bind_addr: false,
@@ -222,22 +243,22 @@ impl App {
                 return;
             }
 
-            if self.editing_intercept {
+            if self.intercept_ui.editing {
                 self.handle_editor_key(key, EditorTarget::Intercept);
                 return;
             }
 
-            if self.repeater_editing {
+            if self.repeater.editing {
                 self.handle_editor_key(key, EditorTarget::Repeater);
                 return;
             }
 
-            if self.history_filtering {
+            if self.history.filtering {
                 self.handle_filter_key(key);
                 return;
             }
 
-            if self.tools_editing {
+            if self.tools.editing {
                 self.handle_tools_editor_key(key);
                 return;
             }
@@ -247,7 +268,7 @@ impl App {
                 return;
             }
 
-            if self.rules_editing_field.is_some() {
+            if self.rules_ui.editing_field.is_some() {
                 self.handle_rules_editor_key(key);
                 return;
             }
@@ -272,7 +293,7 @@ impl App {
                 true
             }
             (KeyModifiers::NONE, KeyCode::Char('q')) => {
-                if !self.history_detail_open {
+                if !self.history.detail_open {
                     self.should_quit = true;
                     return true;
                 }
@@ -316,9 +337,9 @@ impl App {
             }
             (_, KeyCode::F(2)) => {
                 self.editor_mode = self.editor_mode.toggle();
-                self.tools_editor.set_mode(self.editor_mode);
-                self.intercept_editor.set_mode(self.editor_mode);
-                self.repeater_editor.set_mode(self.editor_mode);
+                self.tools.editor.set_mode(self.editor_mode);
+                self.intercept_ui.editor.set_mode(self.editor_mode);
+                self.repeater.editor.set_mode(self.editor_mode);
                 self.status_message = Some((
                     format!("Editor mode: {}", self.editor_mode.label()),
                     std::time::Instant::now(),
@@ -371,29 +392,29 @@ impl App {
                 let now_enabled = self.intercept_state.toggle();
                 if !now_enabled {
                     self.intercept_state.forward_all();
-                    self.intercept_queue.clear();
+                    self.intercept_ui.queue.clear();
                 }
             }
             KeyCode::Char('f') => {
-                if let Some(req) = self.intercept_queue.pop_front() {
+                if let Some(req) = self.intercept_ui.queue.pop_front() {
                     self.intercept_state
                         .resolve(req.id, InterceptDecision::Forward);
-                    self.intercept_scroll = 0;
+                    self.intercept_ui.scroll = 0;
                 }
             }
             KeyCode::Char('d') => {
-                if let Some(req) = self.intercept_queue.pop_front() {
+                if let Some(req) = self.intercept_ui.queue.pop_front() {
                     self.store.mark_dropped(req.id);
                     self.intercept_state
                         .resolve(req.id, InterceptDecision::Drop);
-                    self.intercept_scroll = 0;
+                    self.intercept_ui.scroll = 0;
                 }
             }
             KeyCode::Char('e') => {
-                if let Some(req) = self.intercept_queue.front() {
-                    self.intercept_editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
-                    self.editing_intercept = true;
-                    self.intercept_scroll = 0;
+                if let Some(req) = self.intercept_ui.queue.front() {
+                    self.intercept_ui.editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
+                    self.intercept_ui.editing = true;
+                    self.intercept_ui.scroll = 0;
                 }
             }
             KeyCode::Char('b') => {
@@ -406,10 +427,10 @@ impl App {
                 self.cert_export_buffer.clear();
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.intercept_scroll = self.intercept_scroll.saturating_sub(1);
+                self.intercept_ui.scroll = self.intercept_ui.scroll.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.intercept_scroll += 1;
+                self.intercept_ui.scroll += 1;
             }
             _ => {}
         }
@@ -546,80 +567,80 @@ impl App {
     }
 
     fn handle_history_key(&mut self, key: KeyEvent) {
-        let filtered = self.store.filtered_entries(&self.history_filter);
+        let filtered = self.store.filtered_entries(&self.history.filter);
         let entry_count = filtered.len();
 
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.history_detail_open {
-                    self.history_scroll = self.history_scroll.saturating_sub(1);
-                } else if self.history_selected > 0 {
-                    self.history_selected -= 1;
+                if self.history.detail_open {
+                    self.history.scroll = self.history.scroll.saturating_sub(1);
+                } else if self.history.selected > 0 {
+                    self.history.selected -= 1;
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.history_detail_open {
-                    self.history_scroll += 1;
-                } else if entry_count > 0 && self.history_selected < entry_count - 1 {
-                    self.history_selected += 1;
+                if self.history.detail_open {
+                    self.history.scroll += 1;
+                } else if entry_count > 0 && self.history.selected < entry_count - 1 {
+                    self.history.selected += 1;
                 }
             }
             KeyCode::Home | KeyCode::Char('g')
-                if !self.history_detail_open => {
-                    self.history_selected = 0;
+                if !self.history.detail_open => {
+                    self.history.selected = 0;
                 }
             KeyCode::End | KeyCode::Char('G')
-                if !self.history_detail_open && entry_count > 0 => {
-                    self.history_selected = entry_count - 1;
+                if !self.history.detail_open && entry_count > 0 => {
+                    self.history.selected = entry_count - 1;
                 }
             KeyCode::Enter => {
-                if self.history_detail_open {
-                    self.history_detail_open = false;
-                    self.history_scroll = 0;
+                if self.history.detail_open {
+                    self.history.detail_open = false;
+                    self.history.scroll = 0;
                 } else if entry_count > 0 {
-                    self.history_detail_open = true;
-                    self.history_scroll = 0;
+                    self.history.detail_open = true;
+                    self.history.scroll = 0;
                 }
             }
             KeyCode::Esc
-                if self.history_detail_open => {
-                    self.history_detail_open = false;
-                    self.history_scroll = 0;
+                if self.history.detail_open => {
+                    self.history.detail_open = false;
+                    self.history.scroll = 0;
                 }
             KeyCode::Char('r')
                 if entry_count > 0 => {
                     self.send_to_repeater();
                 }
             KeyCode::Char('/')
-                if !self.history_detail_open => {
-                    self.history_filtering = true;
+                if !self.history.detail_open => {
+                    self.history.filtering = true;
                 }
             KeyCode::Char('c') => {
                 if entry_count > 0
-                    && let Some(entry) = filtered.get(self.history_selected) {
+                    && let Some(entry) = filtered.get(self.history.selected) {
                         let curl = crate::http::export::to_curl(entry);
                         self.export_to_file("curl", "sh", &curl);
                     }
             }
             KeyCode::Char('w') => {
                 if entry_count > 0
-                    && let Some(entry) = filtered.get(self.history_selected) {
+                    && let Some(entry) = filtered.get(self.history.selected) {
                         let raw = crate::http::export::to_raw(entry);
                         self.export_to_file("raw", "txt", &raw);
                     }
             }
             KeyCode::Char('h')
-                if !self.history_detail_open => {
+                if !self.history.detail_open => {
                     let entries: Vec<_> = filtered.iter().map(|e| (*e).clone()).collect();
                     let har = crate::http::export::to_har(&entries);
                     self.export_to_file("har", "har", &har);
                 }
             KeyCode::Char('m') => {
                 if entry_count > 0
-                    && let Some(entry) = filtered.get(self.history_selected) {
-                        self.macro_steps.push(SequenceStep::new(entry.request.clone()));
+                    && let Some(entry) = filtered.get(self.history.selected) {
+                        self.macros.steps.push(SequenceStep::new(entry.request.clone()));
                         self.status_message = Some((
-                            format!("Added to macro ({} steps)", self.macro_steps.len()),
+                            format!("Added to macro ({} steps)", self.macros.steps.len()),
                             std::time::Instant::now(),
                         ));
                     }
@@ -671,64 +692,64 @@ impl App {
                 let mut rules = self.rules.write().unwrap();
                 let name = format!("Rule {}", rules.len() + 1);
                 rules.push(crate::rules::Rule::new(name));
-                self.rules_selected = rules.len() - 1;
+                self.rules_ui.selected = rules.len() - 1;
             }
             KeyCode::Char('x')
                 if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
-                    rules.remove(self.rules_selected);
-                    if self.rules_selected >= rules.len() && !rules.is_empty() {
-                        self.rules_selected = rules.len() - 1;
+                    rules.remove(self.rules_ui.selected);
+                    if self.rules_ui.selected >= rules.len() && !rules.is_empty() {
+                        self.rules_ui.selected = rules.len() - 1;
                     }
                 }
             KeyCode::Enter
                 if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
-                    rules[self.rules_selected].enabled = !rules[self.rules_selected].enabled;
+                    rules[self.rules_ui.selected].enabled = !rules[self.rules_ui.selected].enabled;
                 }
             KeyCode::Char('t')
                 if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
-                    rules[self.rules_selected].target = rules[self.rules_selected].target.next();
+                    rules[self.rules_ui.selected].target = rules[self.rules_ui.selected].target.next();
                 }
             KeyCode::Char('s')
                 if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
-                    rules[self.rules_selected].scope = rules[self.rules_selected].scope.next();
+                    rules[self.rules_ui.selected].scope = rules[self.rules_ui.selected].scope.next();
                 }
             KeyCode::Char('R')
                 if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
-                    rules[self.rules_selected].is_regex = !rules[self.rules_selected].is_regex;
+                    rules[self.rules_ui.selected].is_regex = !rules[self.rules_ui.selected].is_regex;
                 }
             KeyCode::Char('n')
                 if count > 0 => {
                     let rules = self.rules.read().unwrap();
-                    self.rules_edit_buffer = rules[self.rules_selected].name.clone();
+                    self.rules_ui.edit_buffer = rules[self.rules_ui.selected].name.clone();
                     drop(rules);
-                    self.rules_editing_field = Some(RuleField::Name);
+                    self.rules_ui.editing_field = Some(RuleField::Name);
                 }
             KeyCode::Char('p')
                 if count > 0 => {
                     let rules = self.rules.read().unwrap();
-                    self.rules_edit_buffer = rules[self.rules_selected].match_pattern.clone();
+                    self.rules_ui.edit_buffer = rules[self.rules_ui.selected].match_pattern.clone();
                     drop(rules);
-                    self.rules_editing_field = Some(RuleField::Pattern);
+                    self.rules_ui.editing_field = Some(RuleField::Pattern);
                 }
             KeyCode::Char('e')
                 if count > 0 => {
                     let rules = self.rules.read().unwrap();
-                    self.rules_edit_buffer = rules[self.rules_selected].replacement.clone();
+                    self.rules_ui.edit_buffer = rules[self.rules_ui.selected].replacement.clone();
                     drop(rules);
-                    self.rules_editing_field = Some(RuleField::Replacement);
+                    self.rules_ui.editing_field = Some(RuleField::Replacement);
                 }
             KeyCode::Up | KeyCode::Char('k')
-                if self.rules_selected > 0 => {
-                    self.rules_selected -= 1;
+                if self.rules_ui.selected > 0 => {
+                    self.rules_ui.selected -= 1;
                 }
             KeyCode::Down | KeyCode::Char('j')
-                if count > 0 && self.rules_selected < count - 1 => {
-                    self.rules_selected += 1;
+                if count > 0 && self.rules_ui.selected < count - 1 => {
+                    self.rules_ui.selected += 1;
                 }
             _ => {}
         }
@@ -737,34 +758,34 @@ impl App {
     fn handle_rules_editor_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.rules_editing_field = None;
-                self.rules_edit_buffer.clear();
+                self.rules_ui.editing_field = None;
+                self.rules_ui.edit_buffer.clear();
             }
             KeyCode::Enter => {
-                if let Some(field) = self.rules_editing_field {
+                if let Some(field) = self.rules_ui.editing_field {
                     let mut rules = self.rules.write().unwrap();
-                    if self.rules_selected < rules.len() {
+                    if self.rules_ui.selected < rules.len() {
                         match field {
                             RuleField::Name => {
-                                rules[self.rules_selected].name = self.rules_edit_buffer.clone();
+                                rules[self.rules_ui.selected].name = self.rules_ui.edit_buffer.clone();
                             }
                             RuleField::Pattern => {
-                                rules[self.rules_selected].match_pattern = self.rules_edit_buffer.clone();
+                                rules[self.rules_ui.selected].match_pattern = self.rules_ui.edit_buffer.clone();
                             }
                             RuleField::Replacement => {
-                                rules[self.rules_selected].replacement = self.rules_edit_buffer.clone();
+                                rules[self.rules_ui.selected].replacement = self.rules_ui.edit_buffer.clone();
                             }
                         }
                     }
                 }
-                self.rules_editing_field = None;
-                self.rules_edit_buffer.clear();
+                self.rules_ui.editing_field = None;
+                self.rules_ui.edit_buffer.clear();
             }
             KeyCode::Char(c) => {
-                self.rules_edit_buffer.push(c);
+                self.rules_ui.edit_buffer.push(c);
             }
             KeyCode::Backspace => {
-                self.rules_edit_buffer.pop();
+                self.rules_ui.edit_buffer.pop();
             }
             _ => {}
         }
@@ -773,24 +794,24 @@ impl App {
     fn handle_tools_key(&mut self, key: KeyEvent) {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Char('e')) => {
-                self.tools_editing = true;
-                self.tools_editor.cursor_line = 0;
-                self.tools_editor.cursor_col = 0;
+                self.tools.editing = true;
+                self.tools.editor.cursor_line = 0;
+                self.tools.editor.cursor_col = 0;
                 if self.editor_mode == EditorMode::Vim {
-                    self.tools_editor.vim_mode = crate::editor::VimMode::Insert;
+                    self.tools.editor.vim_mode = crate::editor::VimMode::Insert;
                 }
             }
             (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l')) => {
-                self.tools_mode = self.tools_mode.next();
+                self.tools.mode = self.tools.mode.next();
             }
             (KeyModifiers::NONE, KeyCode::Left | KeyCode::Char('h')) => {
-                self.tools_mode = self.tools_mode.prev();
+                self.tools.mode = self.tools.mode.prev();
             }
             (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
-                self.tools_scroll += 1;
+                self.tools.scroll += 1;
             }
             (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
-                self.tools_scroll = self.tools_scroll.saturating_sub(1);
+                self.tools.scroll = self.tools.scroll.saturating_sub(1);
             }
             (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                 let output = self.tools_output();
@@ -814,44 +835,44 @@ impl App {
     }
 
     fn handle_tools_editor_key(&mut self, key: KeyEvent) {
-        match self.tools_editor.handle_key(key) {
+        match self.tools.editor.handle_key(key) {
             EditorAction::Consumed => {}
             EditorAction::ExitEditor => {
-                self.tools_editing = false;
+                self.tools.editing = false;
             }
             EditorAction::Enter => {
-                self.tools_editor.insert_newline();
+                self.tools.editor.insert_newline();
             }
             EditorAction::CtrlEnter => {}
             EditorAction::Custom(k) => {
                 if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('u') {
-                    self.tools_editor.clear();
+                    self.tools.editor.clear();
                 }
             }
         }
     }
 
     pub fn tools_input_text(&self) -> String {
-        self.tools_editor.lines.join("\n")
+        self.tools.editor.lines.join("\n")
     }
 
     pub fn tools_output(&self) -> String {
         use base64::Engine;
         let input = self.tools_input_text();
-        match self.tools_mode {
+        match self.tools.mode {
             ToolsMode::UrlEncode => url_encode(&input),
-            ToolsMode::UrlDecode => url_decode(&input),
+            ToolsMode::UrlDecode => crate::http::url_decode(&input),
             ToolsMode::Base64Encode => base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
             ToolsMode::Base64Decode => {
                 match base64::engine::general_purpose::STANDARD.decode(input.trim()) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                     Err(e) => format!("Error: {}", e),
                 }
             }
             ToolsMode::HexEncode => hex_encode(input.as_bytes()),
             ToolsMode::HexDecode => {
                 match hex_decode(input.trim()) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                     Err(e) => format!("Error: {}", e),
                 }
             }
@@ -861,21 +882,21 @@ impl App {
     fn handle_filter_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.history_filtering = false;
-                self.history_filter.clear();
-                self.history_selected = 0;
+                self.history.filtering = false;
+                self.history.filter.clear();
+                self.history.selected = 0;
             }
             KeyCode::Enter => {
-                self.history_filtering = false;
-                self.history_selected = 0;
+                self.history.filtering = false;
+                self.history.selected = 0;
             }
             KeyCode::Backspace => {
-                self.history_filter.pop();
-                self.history_selected = 0;
+                self.history.filter.pop();
+                self.history.selected = 0;
             }
             KeyCode::Char(c) => {
-                self.history_filter.push(c);
-                self.history_selected = 0;
+                self.history.filter.push(c);
+                self.history.selected = 0;
             }
             _ => {}
         }
@@ -884,63 +905,63 @@ impl App {
     fn handle_repeater_key(&mut self, key: KeyEvent) {
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Enter) => {
-                if self.macro_show {
+                if self.macros.show {
                     self.macro_run();
                 } else {
                     self.repeater_send();
                 }
             }
             (KeyModifiers::NONE, KeyCode::Char('e'))
-                if self.repeater_editor.has_content() => {
-                    self.repeater_editing = true;
-                    self.repeater_editor.cursor_line = 0;
-                    self.repeater_editor.cursor_col = 0;
+                if self.repeater.editor.has_content() => {
+                    self.repeater.editing = true;
+                    self.repeater.editor.cursor_line = 0;
+                    self.repeater.editor.cursor_col = 0;
                     if self.editor_mode == EditorMode::Vim {
-                        self.repeater_editor.vim_mode = crate::editor::VimMode::Insert;
+                        self.repeater.editor.vim_mode = crate::editor::VimMode::Insert;
                     }
                 }
             (KeyModifiers::NONE, KeyCode::Char('d'))
-                if !self.macro_show && self.repeater_original.is_some() => {
-                    self.repeater_show_diff = !self.repeater_show_diff;
+                if !self.macros.show && self.repeater.original.is_some() => {
+                    self.repeater.show_diff = !self.repeater.show_diff;
                 }
             (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
-                self.macro_show = !self.macro_show;
+                self.macros.show = !self.macros.show;
             }
             (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
-                if self.macro_show {
-                    if !self.macro_steps.is_empty() && self.macro_selected < self.macro_steps.len() - 1 {
-                        self.macro_selected += 1;
+                if self.macros.show {
+                    if !self.macros.steps.is_empty() && self.macros.selected < self.macros.steps.len() - 1 {
+                        self.macros.selected += 1;
                     }
                 } else {
-                    self.repeater_req_scroll += 1;
+                    self.repeater.req_scroll += 1;
                 }
             }
             (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
-                if self.macro_show {
-                    if self.macro_selected > 0 {
-                        self.macro_selected -= 1;
+                if self.macros.show {
+                    if self.macros.selected > 0 {
+                        self.macros.selected -= 1;
                     }
                 } else {
-                    self.repeater_req_scroll = self.repeater_req_scroll.saturating_sub(1);
+                    self.repeater.req_scroll = self.repeater.req_scroll.saturating_sub(1);
                 }
             }
             (KeyModifiers::SHIFT, KeyCode::Char('J')) => {
-                self.repeater_resp_scroll += 1;
+                self.repeater.resp_scroll += 1;
             }
             (KeyModifiers::SHIFT, KeyCode::Char('K')) => {
-                self.repeater_resp_scroll = self.repeater_resp_scroll.saturating_sub(1);
+                self.repeater.resp_scroll = self.repeater.resp_scroll.saturating_sub(1);
             }
             (KeyModifiers::NONE, KeyCode::Char('x'))
-                if self.macro_show && !self.macro_steps.is_empty() && !self.macro_running => {
-                    self.macro_steps.remove(self.macro_selected);
-                    if self.macro_selected >= self.macro_steps.len() && !self.macro_steps.is_empty() {
-                        self.macro_selected = self.macro_steps.len() - 1;
+                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running => {
+                    self.macros.steps.remove(self.macros.selected);
+                    if self.macros.selected >= self.macros.steps.len() && !self.macros.steps.is_empty() {
+                        self.macros.selected = self.macros.steps.len() - 1;
                     }
                 }
             (KeyModifiers::NONE, KeyCode::Char('X')) | (KeyModifiers::SHIFT, KeyCode::Char('X'))
-                if self.macro_show && !self.macro_running => {
-                    self.macro_steps.clear();
-                    self.macro_selected = 0;
+                if self.macros.show && !self.macros.running => {
+                    self.macros.steps.clear();
+                    self.macros.selected = 0;
                 }
             _ => {}
         }
@@ -948,8 +969,8 @@ impl App {
 
     fn handle_editor_key(&mut self, key: KeyEvent, target: EditorTarget) {
         let editor = match target {
-            EditorTarget::Intercept => &mut self.intercept_editor,
-            EditorTarget::Repeater => &mut self.repeater_editor,
+            EditorTarget::Intercept => &mut self.intercept_ui.editor,
+            EditorTarget::Repeater => &mut self.repeater.editor,
         };
 
         let action = editor.handle_key(key);
@@ -959,47 +980,47 @@ impl App {
             EditorAction::ExitEditor => {
                 match target {
                     EditorTarget::Intercept => {
-                        self.editing_intercept = false;
-                        self.intercept_editor = TextEditor::new(vec![], self.editor_mode);
+                        self.intercept_ui.editing = false;
+                        self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
                     }
                     EditorTarget::Repeater => {
-                        self.repeater_editing = false;
+                        self.repeater.editing = false;
                     }
                 }
             }
             EditorAction::Enter => {
                 match target {
                     EditorTarget::Intercept => {
-                        if let Some(original) = self.intercept_queue.pop_front() {
+                        if let Some(original) = self.intercept_ui.queue.pop_front() {
                             let edited =
-                                codec::lines_to_request(&self.intercept_editor.lines, &original);
+                                codec::lines_to_request(&self.intercept_ui.editor.lines, &original);
                             self.intercept_state
                                 .resolve(original.id, InterceptDecision::ForwardEdited(edited));
                         }
-                        self.editing_intercept = false;
-                        self.intercept_editor = TextEditor::new(vec![], self.editor_mode);
-                        self.intercept_scroll = 0;
+                        self.intercept_ui.editing = false;
+                        self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
+                        self.intercept_ui.scroll = 0;
                     }
                     EditorTarget::Repeater => {
-                        self.repeater_editor.insert_newline();
+                        self.repeater.editor.insert_newline();
                     }
                 }
             }
             EditorAction::CtrlEnter => {
                 match target {
                     EditorTarget::Intercept => {
-                        if let Some(original) = self.intercept_queue.pop_front() {
+                        if let Some(original) = self.intercept_ui.queue.pop_front() {
                             let edited =
-                                codec::lines_to_request(&self.intercept_editor.lines, &original);
+                                codec::lines_to_request(&self.intercept_ui.editor.lines, &original);
                             self.intercept_state
                                 .resolve(original.id, InterceptDecision::ForwardEdited(edited));
                         }
-                        self.editing_intercept = false;
-                        self.intercept_editor = TextEditor::new(vec![], self.editor_mode);
-                        self.intercept_scroll = 0;
+                        self.intercept_ui.editing = false;
+                        self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
+                        self.intercept_ui.scroll = 0;
                     }
                     EditorTarget::Repeater => {
-                        self.repeater_editing = false;
+                        self.repeater.editing = false;
                         self.repeater_send();
                     }
                 }
@@ -1009,27 +1030,27 @@ impl App {
     }
 
     fn send_to_repeater(&mut self) {
-        let filtered = self.store.filtered_entries(&self.history_filter);
-        if let Some(entry) = filtered.get(self.history_selected) {
+        let filtered = self.store.filtered_entries(&self.history.filter);
+        if let Some(entry) = filtered.get(self.history.selected) {
             let req = &entry.request;
-            self.repeater_editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
-            self.repeater_original = Some(req.clone());
-            self.repeater_response = None;
-            self.repeater_error = None;
-            self.repeater_pending = false;
-            self.repeater_editing = false;
-            self.repeater_req_scroll = 0;
-            self.repeater_resp_scroll = 0;
+            self.repeater.editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
+            self.repeater.original = Some(req.clone());
+            self.repeater.response = None;
+            self.repeater.error = None;
+            self.repeater.pending = false;
+            self.repeater.editing = false;
+            self.repeater.req_scroll = 0;
+            self.repeater.resp_scroll = 0;
             self.active_tab = Tab::Repeater;
         }
     }
 
     fn repeater_send(&mut self) {
-        if self.repeater_editor.lines.is_empty() || self.repeater_pending {
+        if self.repeater.editor.lines.is_empty() || self.repeater.pending {
             return;
         }
 
-        let original = self.repeater_original.clone().unwrap_or(RequestData {
+        let original = self.repeater.original.clone().unwrap_or(RequestData {
             id: RequestId::next(),
             method: "GET".into(),
             uri: "/".into(),
@@ -1042,12 +1063,12 @@ impl App {
             timestamp: std::time::SystemTime::now(),
         });
 
-        let request = codec::lines_to_request(&self.repeater_editor.lines, &original);
-        self.repeater_original = Some(request.clone());
-        self.repeater_pending = true;
-        self.repeater_response = None;
-        self.repeater_error = None;
-        self.repeater_resp_scroll = 0;
+        let request = codec::lines_to_request(&self.repeater.editor.lines, &original);
+        self.repeater.original = Some(request.clone());
+        self.repeater.pending = true;
+        self.repeater.response = None;
+        self.repeater.error = None;
+        self.repeater.resp_scroll = 0;
 
         let ui_tx = self.ui_tx.clone();
         tokio::spawn(async move {
@@ -1056,34 +1077,34 @@ impl App {
     }
 
     fn macro_run(&mut self) {
-        if self.macro_steps.is_empty() || self.macro_running {
+        if self.macros.steps.is_empty() || self.macros.running {
             return;
         }
 
-        for step in &mut self.macro_steps {
+        for step in &mut self.macros.steps {
             step.state = StepState::Pending;
             step.response = None;
             step.error = None;
         }
 
-        self.macro_running = true;
-        self.macro_current_step = 0;
+        self.macros.running = true;
+        self.macros.current_step = 0;
         self.macro_send_next();
     }
 
     fn macro_send_next(&mut self) {
-        if self.macro_current_step >= self.macro_steps.len() {
-            self.macro_running = false;
+        if self.macros.current_step >= self.macros.steps.len() {
+            self.macros.running = false;
             self.status_message = Some((
-                format!("Macro complete ({} steps)", self.macro_steps.len()),
+                format!("Macro complete ({} steps)", self.macros.steps.len()),
                 std::time::Instant::now(),
             ));
             return;
         }
 
-        self.macro_steps[self.macro_current_step].state = StepState::Running;
-        let request = self.macro_steps[self.macro_current_step].request.clone();
-        let step_idx = self.macro_current_step;
+        self.macros.steps[self.macros.current_step].state = StepState::Running;
+        let request = self.macros.steps[self.macros.current_step].request.clone();
+        let step_idx = self.macros.current_step;
         let ui_tx = self.ui_tx.clone();
 
         tokio::spawn(async move {
@@ -1103,8 +1124,8 @@ impl App {
         match msg {
             ProxyToUi::RequestCaptured(req) => {
                 self.store.insert(req);
-                if !self.history_detail_open && self.store.len() > 1 {
-                    self.history_selected = self.store.len() - 1;
+                if !self.history.detail_open && self.store.len() > 1 {
+                    self.history.selected = self.store.len() - 1;
                 }
             }
             ProxyToUi::ResponseReceived(id, resp) => {
@@ -1122,16 +1143,16 @@ impl App {
                 self.store.mark_error(id, err);
             }
             ProxyToUi::InterceptedRequest(req) => {
-                self.intercept_queue.push_back(req);
+                self.intercept_ui.queue.push_back(req);
             }
             ProxyToUi::RepeaterResponse(resp) => {
-                self.repeater_pending = false;
-                self.repeater_response = Some(resp);
-                self.repeater_error = None;
+                self.repeater.pending = false;
+                self.repeater.response = Some(resp);
+                self.repeater.error = None;
             }
             ProxyToUi::RepeaterError(err) => {
-                self.repeater_pending = false;
-                self.repeater_error = Some(err);
+                self.repeater.pending = false;
+                self.repeater.error = Some(err);
             }
             ProxyToUi::WebSocketFrame(id, msg) => {
                 self.store.push_ws_message(id, msg);
@@ -1143,18 +1164,18 @@ impl App {
                 self.store.update_trailers(id, trailers);
             }
             ProxyToUi::MacroResponse(step_idx, resp) => {
-                if step_idx < self.macro_steps.len() {
-                    self.macro_steps[step_idx].response = Some(resp);
-                    self.macro_steps[step_idx].state = StepState::Complete;
-                    self.macro_current_step = step_idx + 1;
+                if step_idx < self.macros.steps.len() {
+                    self.macros.steps[step_idx].response = Some(resp);
+                    self.macros.steps[step_idx].state = StepState::Complete;
+                    self.macros.current_step = step_idx + 1;
                     self.macro_send_next();
                 }
             }
             ProxyToUi::MacroError(step_idx, err) => {
-                if step_idx < self.macro_steps.len() {
-                    self.macro_steps[step_idx].error = Some(err);
-                    self.macro_steps[step_idx].state = StepState::Error;
-                    self.macro_running = false;
+                if step_idx < self.macros.steps.len() {
+                    self.macros.steps[step_idx].error = Some(err);
+                    self.macros.steps[step_idx].state = StepState::Error;
+                    self.macros.running = false;
                     self.status_message = Some((
                         format!("Macro stopped at step {} (error)", step_idx + 1),
                         std::time::Instant::now(),
@@ -1197,9 +1218,9 @@ impl App {
                     Span::raw(tab.title()),
                 ];
 
-                if *tab == Tab::Proxy && !self.intercept_queue.is_empty() {
+                if *tab == Tab::Proxy && !self.intercept_ui.queue.is_empty() {
                     spans.push(Span::styled(
-                        format!(" ({})", self.intercept_queue.len()),
+                        format!(" ({})", self.intercept_ui.queue.len()),
                         Style::default()
                             .fg(Color::Red)
                             .add_modifier(Modifier::BOLD),
@@ -1290,14 +1311,14 @@ impl App {
         };
 
         let editor_mode_span = if self.editor_mode == EditorMode::Vim {
-            let active_editing = self.tools_editing || self.editing_intercept || self.repeater_editing;
+            let active_editing = self.tools.editing || self.intercept_ui.editing || self.repeater.editing;
             if active_editing {
-                let editor = if self.tools_editing {
-                    &self.tools_editor
-                } else if self.editing_intercept {
-                    &self.intercept_editor
+                let editor = if self.tools.editing {
+                    &self.tools.editor
+                } else if self.intercept_ui.editing {
+                    &self.intercept_ui.editor
                 } else {
-                    &self.repeater_editor
+                    &self.repeater.editor
                 };
                 let (label, bg) = match editor.vim_mode {
                     crate::editor::VimMode::Normal => ("NORMAL", Color::Blue),
@@ -1549,29 +1570,6 @@ fn url_encode(input: &str) -> String {
     result
 }
 
-fn url_decode(input: &str) -> String {
-    let mut result = Vec::new();
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(
-                &input[i + 1..i + 3],
-                16,
-            ) {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
-        if bytes[i] == b'+' {
-            result.push(b' ');
-        } else {
-            result.push(bytes[i]);
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&result).to_string()
-}
 
 fn hex_encode(input: &[u8]) -> String {
     input.iter().map(|b| format!("{:02x}", b)).collect()

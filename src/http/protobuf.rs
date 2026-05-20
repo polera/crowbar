@@ -21,7 +21,7 @@ impl std::fmt::Display for ProtoValue {
             ProtoValue::Fixed64(v) => write!(f, "{}", v),
             ProtoValue::Fixed32(v) => write!(f, "{}", v),
             ProtoValue::String(s) => {
-                let truncated: std::string::String = s.chars().take(40).collect();
+                let truncated: String = s.chars().take(40).collect();
                 if s.len() > 40 {
                     write!(f, "\"{}...\"", truncated)
                 } else {
@@ -225,7 +225,7 @@ pub fn format_proto_text(fields: &[ProtoField], indent: usize) -> Vec<String> {
                 lines.push(format!("{}{} str: {}", prefix, field.number, s));
             }
             ProtoValue::Bytes(b) => {
-                let hex: std::string::String =
+                let hex: String =
                     b.iter().map(|byte| format!("{:02x}", byte)).collect();
                 lines.push(format!("{}{} hex: {}", prefix, field.number, hex));
             }

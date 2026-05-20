@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -9,40 +8,22 @@ use hyper::client::conn::http1::Builder as ClientBuilder;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::channel::ProxyToUi;
-use crate::http::models::{HttpVersion, RequestData, RequestId, ResponseData};
-use crate::proxy::intercept::{InterceptDecision, InterceptState};
-use crate::proxy::scope::Scope;
+use crate::http::models::{RequestData, RequestId, ResponseData};
+use crate::proxy::intercept::InterceptDecision;
 use crate::proxy::tunnel;
-use crate::rules::{self, SharedRules};
-use crate::tls::cert_cache::CertCache;
+use crate::proxy::ProxyContext;
+use crate::rules;
 
 pub struct ProxyHandler {
-    ui_tx: mpsc::UnboundedSender<ProxyToUi>,
-    cert_cache: Arc<CertCache>,
-    intercept: Arc<InterceptState>,
-    scope: Arc<Scope>,
-    rules: SharedRules,
+    ctx: ProxyContext,
 }
 
 impl ProxyHandler {
-    pub fn new(
-        ui_tx: mpsc::UnboundedSender<ProxyToUi>,
-        cert_cache: Arc<CertCache>,
-        intercept: Arc<InterceptState>,
-        scope: Arc<Scope>,
-        rules: SharedRules,
-    ) -> Self {
-        Self {
-            ui_tx,
-            cert_cache,
-            intercept,
-            scope,
-            rules,
-        }
+    pub fn new(ctx: ProxyContext) -> Self {
+        Self { ctx }
     }
 
     pub async fn handle(
@@ -64,17 +45,12 @@ impl ProxyHandler {
         let host = req.uri().host().unwrap_or("unknown").to_string();
         let port = req.uri().port_u16().unwrap_or(443);
 
-        let cert_cache = self.cert_cache.clone();
-        let ui_tx = self.ui_tx.clone();
-        let intercept = self.intercept.clone();
-        let scope = self.scope.clone();
-        let rules = self.rules.clone();
+        let ctx = self.ctx.clone();
 
         tokio::spawn(async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
-                    tunnel::handle_tunnel(upgraded, host, port, cert_cache, ui_tx, intercept, scope, rules)
-                        .await;
+                    tunnel::handle_tunnel(upgraded, host, port, ctx).await;
                 }
                 Err(e) => {
                     warn!("CONNECT upgrade failed: {}", e);
@@ -94,12 +70,7 @@ impl ProxyHandler {
 
         let uri = req.uri().clone();
         let method = req.method().clone();
-        let version = match req.version() {
-            hyper::Version::HTTP_10 => HttpVersion::Http10,
-            hyper::Version::HTTP_11 => HttpVersion::Http11,
-            hyper::Version::HTTP_2 => HttpVersion::Http2,
-            _ => HttpVersion::Http11,
-        };
+        let version = req.version().into();
 
         let host = uri
             .host()
@@ -112,16 +83,12 @@ impl ProxyHandler {
             })
             .unwrap_or_default();
 
-        let headers: Vec<(String, String)> = req
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-            .collect();
+        let headers = crate::http::models::extract_headers(req.headers());
 
         let (parts, body) = req.into_parts();
         let body_bytes = body.collect().await?.to_bytes();
 
-        let in_scope = self.scope.is_in_scope(&host);
+        let in_scope = self.ctx.scope.is_in_scope(&host);
 
         let mut request_data = RequestData {
             id: request_id,
@@ -129,8 +96,8 @@ impl ProxyHandler {
             uri: uri.to_string(),
             host: host.clone(),
             version,
-            headers: headers.clone(),
-            body: body_bytes.clone(),
+            headers,
+            body: body_bytes,
             is_tls: false,
             is_grpc: false,
             timestamp: std::time::SystemTime::now(),
@@ -138,12 +105,12 @@ impl ProxyHandler {
 
         if in_scope {
             let _ = self
-                .ui_tx
+                .ctx.ui_tx
                 .send(ProxyToUi::RequestCaptured(request_data.clone()));
         }
 
         if in_scope
-            && let Some(rx) = self.intercept.intercept_request(&request_data, &self.ui_tx) {
+            && let Some(rx) = self.ctx.intercept.intercept_request(&request_data, &self.ctx.ui_tx) {
                 match rx.await {
                     Ok(InterceptDecision::Drop) => {
                         return Ok(Response::builder()
@@ -160,7 +127,7 @@ impl ProxyHandler {
             }
 
         rules::apply_request_rules(
-            &self.rules,
+            &self.ctx.rules,
             &mut request_data.uri,
             &mut request_data.headers,
             &mut request_data.body,
@@ -174,7 +141,7 @@ impl ProxyHandler {
             Ok(s) => s,
             Err(e) => {
                 warn!("Failed to connect to upstream {}: {}", addr, e);
-                let _ = self.ui_tx.send(ProxyToUi::RequestError(
+                let _ = self.ctx.ui_tx.send(ProxyToUi::RequestError(
                     request_id,
                     format!("Connection failed: {}", e),
                 ));
@@ -198,7 +165,7 @@ impl ProxyHandler {
             Ok(pair) => pair,
             Err(e) => {
                 warn!("Upstream handshake failed for {}: {}", addr, e);
-                let _ = self.ui_tx.send(ProxyToUi::RequestError(
+                let _ = self.ctx.ui_tx.send(ProxyToUi::RequestError(
                     request_id,
                     format!("Handshake failed: {}", e),
                 ));
@@ -244,7 +211,7 @@ impl ProxyHandler {
             Ok(resp) => resp,
             Err(e) => {
                 warn!("Upstream request failed for {}: {}", addr, e);
-                let _ = self.ui_tx.send(ProxyToUi::RequestError(
+                let _ = self.ctx.ui_tx.send(ProxyToUi::RequestError(
                     request_id,
                     format!("Request failed: {}", e),
                 ));
@@ -259,29 +226,17 @@ impl ProxyHandler {
         };
 
         let resp_status = upstream_resp.status().as_u16();
-        let resp_version = match upstream_resp.version() {
-            hyper::Version::HTTP_10 => HttpVersion::Http10,
-            hyper::Version::HTTP_11 => HttpVersion::Http11,
-            hyper::Version::HTTP_2 => HttpVersion::Http2,
-            _ => HttpVersion::Http11,
-        };
-        let mut resp_headers: Vec<(String, String)> = upstream_resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-            .collect();
+        let resp_version = upstream_resp.version().into();
+        let mut resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
 
         let mut resp_body = upstream_resp.collect().await?.to_bytes();
         let duration = start.elapsed();
 
-        rules::apply_response_rules(&self.rules, &mut resp_headers, &mut resp_body);
+        rules::apply_response_rules(&self.ctx.rules, &mut resp_headers, &mut resp_body);
 
         let response_data = ResponseData {
             status: resp_status,
-            reason: http::StatusCode::from_u16(resp_status)
-                .map(|s| s.canonical_reason().unwrap_or(""))
-                .unwrap_or("")
-                .to_string(),
+            reason: crate::http::models::status_reason(resp_status),
             version: resp_version,
             headers: resp_headers.clone(),
             body: resp_body.clone(),
@@ -291,7 +246,7 @@ impl ProxyHandler {
 
         if in_scope {
             let _ = self
-                .ui_tx
+                .ctx.ui_tx
                 .send(ProxyToUi::ResponseReceived(request_id, response_data));
         }
 
