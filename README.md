@@ -33,7 +33,9 @@ A terminal-based web security testing proxy built in Rust. Intercept, inspect, a
 - **Passive Scanning** — Flag common security issues: missing HSTS/CSP/X-Frame-Options/X-Content-Type-Options headers, server/X-Powered-By information disclosure, insecure cookie flags (Secure, HttpOnly, SameSite), 5xx errors, and stack trace detection (Java, Python, .NET, Go)
 - **Session Persistence** — Save (`Ctrl+S`) and load sessions to pick up where you left off; auto-generated timestamped session names
 - **Import/Export** — Import HAR files; export as curl commands, raw HTTP, or HAR (HTTP Archive 1.2)
-- **Encoding Tools** — Built-in URL, Base64, and Hex encode/decode utilities with real-time output
+- **Encoding Tools** — Built-in URL, Base64, and Hex encode/decode utilities with real-time output and clipboard copy
+- **Editor Modes** — Choose between a standard editor and Vim-style keybindings (with normal/insert modes, motions, and operators); toggle with `F2` or set via config/CLI
+- **Multi-Instance Support** — Run multiple Crowbar instances simultaneously; automatic port selection finds the next available port if the default is occupied
 - **Runtime Reconfiguration** — Change the proxy bind address without restarting
 
 ## Installation
@@ -57,6 +59,9 @@ crowbar --bind 0.0.0.0:9090
 
 # Start with intercept enabled
 crowbar --intercept
+
+# Start with Vim editor mode
+crowbar --editor-mode vim
 
 # Limit to specific hosts
 crowbar --scope '*.example.com' --scope 'api.internal.dev'
@@ -94,19 +99,20 @@ Optional config at `~/.crowbar/config.toml`:
 bind = "127.0.0.1:8080"
 intercept = false
 scope = ["*.example.com"]
+editor_mode = "default"  # or "vim"
 ```
 
 CLI flags override config file values.
 
 ## TUI Tabs
 
-The interface is organized into five tabs, switchable with `Tab`/`Shift+Tab` or number keys `1`–`5`:
+The interface is organized into five tabs, switchable with `Tab`/`Shift+Tab` or number keys `1`–`5`. If the default port is in use, Crowbar automatically tries the next available port (up to 25 consecutive ports from the base).
 
 1. **Proxy** — Live intercept queue, toggle intercept on/off, forward/drop/edit queued requests, change bind address, export CA certificate
 2. **History** — Table of all captured requests (method, host, path, status, size, time) with filter bar, detail view showing request/response headers and bodies, security findings, and WebSocket messages
 3. **Repeater** — Load a request from history, edit it freely, send it, and view the response; toggle a diff view to compare changes; manage macro sequences
 4. **Rules** — Create, edit, enable/disable, and delete match & replace rules with configurable target (request/response/both), scope (URL/headers/body/all), and regex support
-5. **Tools** — Cycle through encoding utilities (URL, Base64, Hex encode/decode) with a live input/output editor
+5. **Tools** — Cycle through encoding utilities (URL, Base64, Hex encode/decode) with a live input/output editor and clipboard copy
 
 ## Keyboard Shortcuts
 
@@ -117,6 +123,7 @@ The interface is organized into five tabs, switchable with `Tab`/`Shift+Tab` or 
 | `Tab` / `Shift+Tab` | Switch tabs |
 | `1`–`5` | Jump to tab |
 | `?` | Show help overlay |
+| `F2` | Toggle editor mode (Default / Vim) |
 | `Ctrl+S` | Save session |
 | `Ctrl+C` / `q` | Quit |
 
@@ -179,6 +186,40 @@ The interface is organized into five tabs, switchable with `Tab`/`Shift+Tab` or 
 | `←` / `h` | Previous tool |
 | `→` / `l` | Next tool |
 | `j` / `k` | Scroll output |
+| `Ctrl+U` | Clear input |
+| `Ctrl+Y` | Copy output to clipboard |
+
+## Editor Modes
+
+All text editors in Crowbar (intercept, repeater, tools, rules) share one of two modes, toggled at any time with `F2`:
+
+### Default Mode
+
+Standard text editing with arrow key navigation, Home/End, Ctrl+Home/Ctrl+End, Backspace/Delete, and Enter for new lines. Press `Esc` to exit the editor.
+
+### Vim Mode
+
+Enters **normal mode** by default. Press `i`, `a`, `I`, `A`, `o`, or `O` to switch to **insert mode**; press `Esc` to return to normal mode or exit the editor.
+
+**Normal mode motions and operators:**
+
+| Key | Action |
+|-----|--------|
+| `h` / `j` / `k` / `l` | Move left / down / up / right |
+| `0` / `$` | Jump to line start / end |
+| `^` | First non-whitespace character |
+| `w` / `b` / `e` | Word forward / backward / end |
+| `gg` / `G` | Go to beginning / end of text |
+| `x` | Delete character at cursor |
+| `D` | Delete to end of line |
+| `dd` | Delete entire line |
+| `dw` | Delete word |
+| `d$` | Delete to end of line |
+| `u` | Undo |
+
+**Insert mode** supports the same editing keys as Default mode. Press `Esc` to return to normal mode.
+
+Set the initial editor mode via CLI (`--editor-mode vim`) or config file (`editor_mode = "vim"`).
 
 ## File Locations
 
