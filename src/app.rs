@@ -792,6 +792,23 @@ impl App {
             (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
                 self.tools_scroll = self.tools_scroll.saturating_sub(1);
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
+                let output = self.tools_output();
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(output)) {
+                    Ok(()) => {
+                        self.status_message = Some((
+                            "Copied to clipboard".to_string(),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                    Err(e) => {
+                        self.status_message = Some((
+                            format!("Clipboard error: {}", e),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1420,7 +1437,7 @@ impl App {
     fn render_help_overlay(&self, frame: &mut Frame) {
         let area = frame.area();
         let width = 52.min(area.width.saturating_sub(4));
-        let height = 38.min(area.height.saturating_sub(4));
+        let height = 46.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(width)) / 2;
         let y = (area.height.saturating_sub(height)) / 2;
         let popup = Rect::new(x, y, width, height);
@@ -1471,6 +1488,13 @@ impl App {
             Line::from(vec![Span::styled("  Enter          ", key), Span::raw("Toggle enabled")]),
             Line::from(vec![Span::styled("  n/p/e          ", key), Span::raw("Edit name / pattern / replacement")]),
             Line::from(vec![Span::styled("  t/s/R          ", key), Span::raw("Cycle target / scope / regex")]),
+            Line::raw(""),
+            Line::from(Span::styled("Tools", section)),
+            Line::from(vec![Span::styled("  h/l            ", key), Span::raw("Switch tool")]),
+            Line::from(vec![Span::styled("  e              ", key), Span::raw("Edit input")]),
+            Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Scroll output")]),
+            Line::from(vec![Span::styled("  Ctrl+U         ", key), Span::raw("Clear input")]),
+            Line::from(vec![Span::styled("  Ctrl+Y         ", key), Span::raw("Copy output to clipboard")]),
             Line::raw(""),
             Line::from(Span::styled("Editor", section)),
             Line::from(vec![Span::styled("  F2             ", key), Span::raw("Toggle vim/default mode")]),
