@@ -65,24 +65,67 @@ async fn main() -> anyhow::Result<()> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<ProxyToUi>();
     let app_tx = ui_tx.clone();
 
-    let listener = TcpListener::bind(config.bind).await?;
-    let server = ProxyServer::new(
-        config.bind,
-        ui_tx,
-        cert_cache.clone(),
-        intercept.clone(),
-        scope.clone(),
-        rules.clone(),
-        cancel.clone(),
-    );
-    tokio::spawn(async move {
-        if let Err(e) = server.run(listener).await {
-            tracing::error!("Proxy server error: {}", e);
+    let bound = {
+        let mut addr = config.bind;
+        let base_port = addr.port();
+        let mut result = None;
+        for i in 0..25 {
+            addr.set_port(base_port + i);
+            match TcpListener::bind(addr).await {
+                Ok(l) => {
+                    if i > 0 {
+                        info!("Port {} in use, bound to {} instead", base_port, addr);
+                    }
+                    result = Some((l, addr));
+                    break;
+                }
+                Err(e) => {
+                    info!("Failed to bind {}: {}", addr, e);
+                }
+            }
         }
-    });
+        result
+    };
+
+    let proxy_running = bound.is_some();
+    let bind_addr = bound.as_ref().map(|(_, a)| *a).unwrap_or(config.bind);
+
+    if let Some((listener, _)) = bound {
+        let server = ProxyServer::new(
+            bind_addr,
+            ui_tx,
+            cert_cache.clone(),
+            intercept.clone(),
+            scope.clone(),
+            rules.clone(),
+            cancel.clone(),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = server.run(listener).await {
+                tracing::error!("Proxy server error: {}", e);
+            }
+        });
+    } else {
+        info!(
+            "Could not bind to ports {}-{}; starting without proxy",
+            config.bind.port(),
+            config.bind.port() + 24,
+        );
+    }
 
     let mut tui = terminal::init()?;
-    let mut app = App::new(config.bind, intercept.clone(), scope.clone(), rules.clone(), app_tx);
+    let mut app = App::new(bind_addr, intercept.clone(), scope.clone(), rules.clone(), app_tx);
+    app.proxy_running = proxy_running;
+    if !proxy_running {
+        app.status_message = Some((
+            format!(
+                "Could not bind to ports {}-{}. Press 'b' to specify a bind address.",
+                config.bind.port(),
+                config.bind.port() + 24,
+            ),
+            std::time::Instant::now(),
+        ));
+    }
 
     if let Some(path) = config.load {
         app.load_session(&path);
@@ -148,6 +191,7 @@ async fn run_app(
                     });
 
                     app.bind_addr = new_addr;
+                    app.proxy_running = true;
                     app.status_message = Some((
                         format!("Proxy restarted on {}", new_addr),
                         std::time::Instant::now(),

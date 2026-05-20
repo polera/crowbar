@@ -87,6 +87,9 @@ pub struct App {
     pub tools_cursor_col: usize,
     pub tools_scroll: u16,
 
+    // Proxy state
+    pub proxy_running: bool,
+
     // Bind address editing
     pub editing_bind_addr: bool,
     pub bind_addr_buffer: String,
@@ -195,6 +198,7 @@ impl App {
             tools_cursor_line: 0,
             tools_cursor_col: 0,
             tools_scroll: 0,
+            proxy_running: true,
             editing_bind_addr: false,
             bind_addr_buffer: String::new(),
             pending_rebind: None,
@@ -791,6 +795,11 @@ impl App {
             (_, KeyCode::Esc) => {
                 self.tools_editing = false;
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                self.tools_input = vec![String::new()];
+                self.tools_cursor_line = 0;
+                self.tools_cursor_col = 0;
+            }
             (_, KeyCode::Enter) => {
                 let col = self.tools_cursor_col.min(self.tools_input[self.tools_cursor_line].len());
                 let rest = self.tools_input[self.tools_cursor_line][col..].to_string();
@@ -1346,7 +1355,12 @@ impl App {
             .filter(|e| e.state == EntryState::Error)
             .count();
 
-        let intercept_span = if self.intercept_enabled() {
+        let intercept_span = if !self.proxy_running {
+            Span::styled(
+                " NOT BOUND ",
+                Style::default().bg(Color::Red).fg(Color::White).bold(),
+            )
+        } else if self.intercept_enabled() {
             Span::styled(
                 " INTERCEPT ",
                 Style::default().bg(Color::Red).fg(Color::White).bold(),

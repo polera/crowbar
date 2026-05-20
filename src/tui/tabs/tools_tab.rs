@@ -48,7 +48,7 @@ fn render_mode_selector(app: &App, frame: &mut Frame, area: Rect) {
     let widget = Paragraph::new(Line::from(spans)).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Tools (h/l:switch  e:edit) "),
+            .title(" Tools (h/l:switch  e:edit  C-u:clear) "),
     );
     frame.render_widget(widget, area);
 }
