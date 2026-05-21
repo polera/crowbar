@@ -27,7 +27,7 @@ A terminal-based web security testing proxy built in Rust. Intercept, inspect, a
 - **Request History** — Browse, filter, and search captured traffic with syntax-highlighted bodies, JSON pretty-printing, and hex view for binary data
 - **Repeater** — Edit and replay requests with side-by-side diff view comparing original and modified requests
 - **Macros / Sequences** — Build ordered sequences of requests from history, then execute them step-by-step with per-step status tracking
-- **Match & Replace Rules** — Modify requests, responses, or both automatically using regex or literal patterns across URL, headers, body, or all scopes
+- **Match & Replace Rules** — Modify requests, responses, or both automatically using regex or literal patterns across URL, headers, body, or all scopes; import and export rule sets as JSON
 - **WebSocket Support** — Intercept, relay, and display WebSocket text and binary frames with direction and timestamp tracking
 - **Scope Filtering** — Limit capture to specific hosts or wildcard domain patterns (e.g. `*.example.com`)
 - **Passive Scanning** — Flag common security issues: missing HSTS/CSP/X-Frame-Options/X-Content-Type-Options headers, server/X-Powered-By information disclosure, insecure cookie flags (Secure, HttpOnly, SameSite), 5xx errors, and stack trace detection (Java, Python, .NET, Go)
@@ -36,7 +36,7 @@ A terminal-based web security testing proxy built in Rust. Intercept, inspect, a
 - **Encoding Tools** — Built-in URL, Base64, and Hex encode/decode utilities with real-time output and clipboard copy
 - **Editor Modes** — Choose between a standard editor and Vim-style keybindings (with normal/insert modes, motions, and operators); toggle with `F2` or set via config/CLI
 - **Multi-Instance Support** — Run multiple Crowbar instances simultaneously; automatic port selection finds the next available port if the default is occupied
-- **Runtime Reconfiguration** — Change the proxy bind address without restarting
+- **Runtime Reconfiguration** — Change the proxy bind address and scope patterns without restarting
 
 ## Installation
 
@@ -91,6 +91,21 @@ You can also export the CA certificate from the Proxy tab in the TUI.
 crowbar import recording.har --name my-session
 ```
 
+### Rules Management
+
+```sh
+# Export a rules template to the default directory (~/.crowbar/rules/)
+crowbar rules-export
+
+# Export to a specific file
+crowbar rules-export /path/to/rules.json
+
+# Validate a rules file
+crowbar rules-validate /path/to/rules.json
+```
+
+Rules can also be imported and exported from the Rules tab in the TUI.
+
 ### Configuration File
 
 Optional config at `~/.crowbar/config.toml`:
@@ -108,7 +123,7 @@ CLI flags override config file values.
 
 The interface is organized into five tabs, switchable with `Tab`/`Shift+Tab` or number keys `1`–`5`. If the default port is in use, Crowbar automatically tries the next available port (up to 25 consecutive ports from the base).
 
-1. **Proxy** — Live intercept queue, toggle intercept on/off, forward/drop/edit queued requests, change bind address, export CA certificate
+1. **Proxy** — Live intercept queue, toggle intercept on/off, forward/drop/edit queued requests, change bind address, edit scope patterns, export CA certificate
 2. **History** — Table of all captured requests (method, host, path, status, size, time) with filter bar, detail view showing request/response headers and bodies, security findings, and WebSocket messages
 3. **Repeater** — Load a request from history, edit it freely, send it, and view the response; toggle a diff view to compare changes; manage macro sequences
 4. **Rules** — Create, edit, enable/disable, and delete match & replace rules with configurable target (request/response/both), scope (URL/headers/body/all), and regex support
@@ -136,6 +151,7 @@ The interface is organized into five tabs, switchable with `Tab`/`Shift+Tab` or 
 | `d` | Drop intercepted request |
 | `e` | Edit intercepted request |
 | `b` | Change bind address |
+| `s` | Edit scope patterns |
 | `C` | Export CA certificate |
 | `j` / `k` | Scroll request body |
 
@@ -176,6 +192,8 @@ The interface is organized into five tabs, switchable with `Tab`/`Shift+Tab` or 
 | `n` / `p` / `e` | Edit name / pattern / replacement |
 | `t` / `s` | Cycle target / scope |
 | `R` | Toggle regex mode |
+| `E` | Export rules to file |
+| `I` | Import rules from file |
 | `j` / `k` | Navigate rules |
 
 ### Tools Tab
@@ -199,7 +217,7 @@ Standard text editing with arrow key navigation, Home/End, Ctrl+Home/Ctrl+End, B
 
 ### Vim Mode
 
-Enters **normal mode** by default. Press `i`, `a`, `I`, `A`, `o`, or `O` to switch to **insert mode**; press `Esc` to return to normal mode or exit the editor.
+Enters **normal mode** by default. Press `i`, `a`, `I`, `A`, `o`, or `O` to switch to **insert mode**; press `Esc` to return to normal mode, and `q` in normal mode to exit the editor.
 
 **Normal mode motions and operators:**
 
@@ -216,6 +234,7 @@ Enters **normal mode** by default. Press `i`, `a`, `I`, `A`, `o`, or `O` to swit
 | `dw` | Delete word |
 | `d$` | Delete to end of line |
 | `u` | Undo |
+| `q` | Exit editor |
 
 **Insert mode** supports the same editing keys as Default mode. Press `Esc` to return to normal mode.
 
@@ -228,6 +247,7 @@ Set the initial editor mode via CLI (`--editor-mode vim`) or config file (`edito
 | `~/.crowbar/ca.pem`, `~/.crowbar/ca.key` | Generated CA certificate and private key |
 | `~/.crowbar/config.toml` | Optional configuration file |
 | `~/.crowbar/sessions/` | Saved session files (JSON) |
+| `~/.crowbar/rules/` | Exported/imported rule sets (JSON) |
 | `~/.crowbar/exports/` | Exported data (HAR, curl, raw HTTP) |
 | `~/.crowbar/crowbar.log` | Application log |
 
