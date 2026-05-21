@@ -272,5 +272,25 @@ fn handle_command(cmd: crate::config::Command) -> anyhow::Result<()> {
             eprintln!("Load with: crowbar --load {}", path.display());
             Ok(())
         }
+        crate::config::Command::RulesExport { output } => {
+            let template = vec![crate::rules::Rule::new("Example rule".into())];
+            match output {
+                Some(path) => {
+                    crate::rules::persist::save_to(&template, &path)?;
+                    eprintln!("Exported rules template to {}", path.display());
+                }
+                None => {
+                    let name = crate::rules::persist::auto_save_name();
+                    let path = crate::rules::persist::save(&template, &name)?;
+                    eprintln!("Exported rules template to {}", path.display());
+                }
+            }
+            Ok(())
+        }
+        crate::config::Command::RulesValidate { input } => {
+            let rules = crate::rules::persist::load(&input)?;
+            eprintln!("Validated {} rules from {}", rules.len(), input.display());
+            Ok(())
+        }
     }
 }

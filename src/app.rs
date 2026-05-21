@@ -66,6 +66,8 @@ pub struct RulesUiState {
     pub selected: usize,
     pub editing_field: Option<RuleField>,
     pub edit_buffer: String,
+    pub importing: bool,
+    pub import_buffer: String,
 }
 
 pub struct ToolsState {
@@ -209,6 +211,8 @@ impl App {
                 selected: 0,
                 editing_field: None,
                 edit_buffer: String::new(),
+                importing: false,
+                import_buffer: String::new(),
             },
             tools: ToolsState {
                 mode: ToolsMode::UrlEncode,
@@ -281,6 +285,11 @@ impl App {
 
             if self.rules_ui.editing_field.is_some() {
                 self.handle_rules_editor_key(key);
+                return;
+            }
+
+            if self.rules_ui.importing {
+                self.handle_rules_import_editor_key(key);
                 return;
             }
 
@@ -373,6 +382,32 @@ impl App {
             Err(e) => {
                 self.status_message = Some((
                     format!("Save failed: {}", e),
+                    std::time::Instant::now(),
+                ));
+            }
+        }
+    }
+
+    fn export_rules(&mut self) {
+        let rules = self.rules.read().unwrap().clone();
+        if rules.is_empty() {
+            self.status_message = Some((
+                "No rules to export".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        let name = crate::rules::persist::auto_save_name();
+        match crate::rules::persist::save(&rules, &name) {
+            Ok(path) => {
+                self.status_message = Some((
+                    format!("Exported {} rules to {}", rules.len(), path.display()),
+                    std::time::Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.status_message = Some((
+                    format!("Export failed: {}", e),
                     std::time::Instant::now(),
                 ));
             }
@@ -802,6 +837,55 @@ impl App {
                 if count > 0 && self.rules_ui.selected < count - 1 => {
                     self.rules_ui.selected += 1;
                 }
+            KeyCode::Char('E') => {
+                self.export_rules();
+            }
+            KeyCode::Char('I') => {
+                self.rules_ui.importing = true;
+                self.rules_ui.import_buffer.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_rules_import_editor_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.rules_ui.importing = false;
+                self.rules_ui.import_buffer.clear();
+            }
+            KeyCode::Enter => {
+                let raw = &self.rules_ui.import_buffer;
+                let expanded = match raw.strip_prefix("~/") {
+                    Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+                    None => std::path::PathBuf::from(raw),
+                };
+                match crate::rules::persist::load(&expanded) {
+                    Ok(imported) => {
+                        let count = imported.len();
+                        let mut rules = self.rules.write().unwrap();
+                        rules.extend(imported);
+                        self.status_message = Some((
+                            format!("Imported {} rules from {}", count, expanded.display()),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                    Err(e) => {
+                        self.status_message = Some((
+                            format!("Import failed: {}", e),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                }
+                self.rules_ui.importing = false;
+                self.rules_ui.import_buffer.clear();
+            }
+            KeyCode::Char(c) => {
+                self.rules_ui.import_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                self.rules_ui.import_buffer.pop();
+            }
             _ => {}
         }
     }

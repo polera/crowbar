@@ -1,3 +1,5 @@
+pub mod persist;
+
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;

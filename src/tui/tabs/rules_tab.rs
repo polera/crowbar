@@ -157,7 +157,23 @@ fn render_detail(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, are
     frame.render_widget(widget, area);
 }
 
-fn render_actions(_app: &App, frame: &mut Frame, area: Rect) {
+fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
+    if app.rules_ui.importing {
+        let label = Style::default().fg(Color::Cyan);
+        let line = Line::from(vec![
+            Span::styled(" Import file: ", label),
+            Span::raw(format!("{}|", app.rules_ui.import_buffer)),
+        ]);
+        let widget = Paragraph::new(line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Import Rules (Enter to confirm, Esc to cancel) ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        frame.render_widget(widget, area);
+        return;
+    }
+
     let key = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
@@ -180,7 +196,11 @@ fn render_actions(_app: &App, frame: &mut Frame, area: Rect) {
         Span::styled("s", key),
         Span::raw(":scope "),
         Span::styled("R", key),
-        Span::raw(":regex"),
+        Span::raw(":regex "),
+        Span::styled("I", key),
+        Span::raw(":import "),
+        Span::styled("E", key),
+        Span::raw(":export"),
     ]);
 
     let widget = Paragraph::new(line).block(

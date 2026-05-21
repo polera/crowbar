@@ -46,6 +46,16 @@ pub enum Command {
         #[arg(short, long, help = "Output session name (default: derived from input filename)")]
         name: Option<String>,
     },
+    #[command(name = "rules-export", about = "Export rules to a JSON file")]
+    RulesExport {
+        #[arg(help = "Output file path (default: ~/.crowbar/rules/rules-<timestamp>.json)")]
+        output: Option<PathBuf>,
+    },
+    #[command(name = "rules-validate", about = "Validate a rules JSON file")]
+    RulesValidate {
+        #[arg(help = "Path to rules JSON file")]
+        input: PathBuf,
+    },
 }
 
 #[derive(Debug, Deserialize, Default)]
