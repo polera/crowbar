@@ -24,6 +24,9 @@ impl Scope {
         self.patterns.read().unwrap().clone()
     }
 
+    pub fn set_patterns(&self, patterns: Vec<String>) {
+        *self.patterns.write().unwrap() = patterns;
+    }
 }
 
 fn match_pattern(pattern: &str, host: &str) -> bool {

@@ -258,7 +258,7 @@ impl TextEditor {
         }
 
         match (key.modifiers, key.code) {
-            (_, KeyCode::Esc) => EditorAction::ExitEditor,
+            (_, KeyCode::Esc) => EditorAction::Consumed,
 
             // Movement
             (_, KeyCode::Char('h') | KeyCode::Left) => {
@@ -391,6 +391,9 @@ impl TextEditor {
                 self.undo();
                 EditorAction::Consumed
             }
+
+            // Cancel / quit
+            (_, KeyCode::Char('q')) => EditorAction::ExitEditor,
 
             _ => EditorAction::Consumed,
         }

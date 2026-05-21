@@ -102,6 +102,10 @@ pub struct App {
     pub bind_addr_buffer: String,
     pub pending_rebind: Option<SocketAddr>,
 
+    // Scope editing
+    pub editing_scope: bool,
+    pub scope_buffer: String,
+
     // Certificate info overlay
     pub show_cert_info: bool,
     pub cert_export_editing: bool,
@@ -217,6 +221,8 @@ impl App {
             editing_bind_addr: false,
             bind_addr_buffer: String::new(),
             pending_rebind: None,
+            editing_scope: false,
+            scope_buffer: String::new(),
             show_cert_info: false,
             cert_export_editing: false,
             cert_export_buffer: String::new(),
@@ -265,6 +271,11 @@ impl App {
 
             if self.editing_bind_addr {
                 self.handle_bind_addr_editor_key(key);
+                return;
+            }
+
+            if self.editing_scope {
+                self.handle_scope_editor_key(key);
                 return;
             }
 
@@ -421,6 +432,10 @@ impl App {
                 self.bind_addr_buffer = self.bind_addr.to_string();
                 self.editing_bind_addr = true;
             }
+            KeyCode::Char('s') => {
+                self.scope_buffer = self.scope.patterns().join(", ");
+                self.editing_scope = true;
+            }
             KeyCode::Char('C') => {
                 self.show_cert_info = true;
                 self.cert_export_editing = false;
@@ -468,6 +483,42 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.bind_addr_buffer.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_scope_editor_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.editing_scope = false;
+                self.scope_buffer.clear();
+            }
+            KeyCode::Enter => {
+                let patterns: Vec<String> = self
+                    .scope_buffer
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let count = patterns.len();
+                self.scope.set_patterns(patterns);
+                self.editing_scope = false;
+                self.scope_buffer.clear();
+                self.status_message = Some((
+                    if count == 0 {
+                        "Scope cleared — capturing all traffic".to_string()
+                    } else {
+                        format!("Scope updated ({} pattern{})", count, if count == 1 { "" } else { "s" })
+                    },
+                    std::time::Instant::now(),
+                ));
+            }
+            KeyCode::Char(c) => {
+                self.scope_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                self.scope_buffer.pop();
             }
             _ => {}
         }
@@ -1236,8 +1287,9 @@ impl App {
             .position(|t| *t == self.active_tab)
             .unwrap_or(0);
 
+        let version = env!("CARGO_PKG_VERSION");
         let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::ALL).title(" crowbar "))
+            .block(Block::default().borders(Borders::ALL).title(format!(" crowbar v{version} ")))
             .select(selected)
             .highlight_style(
                 Style::default()
@@ -1481,6 +1533,7 @@ impl App {
             Line::from(vec![Span::styled("  d              ", key), Span::raw("Drop intercepted request")]),
             Line::from(vec![Span::styled("  e              ", key), Span::raw("Edit intercepted request")]),
             Line::from(vec![Span::styled("  b              ", key), Span::raw("Change bind address")]),
+            Line::from(vec![Span::styled("  s              ", key), Span::raw("Edit scope patterns")]),
             Line::from(vec![Span::styled("  C              ", key), Span::raw("Export CA certificate")]),
             Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Scroll request")]),
             Line::raw(""),

@@ -43,6 +43,23 @@ fn render_status_line(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
+    if app.editing_scope {
+        let line = Line::from(vec![
+            Span::raw(" Scope: "),
+            Span::styled(&app.scope_buffer, Style::default().fg(Color::White)),
+            Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
+            Span::styled("  (comma-separated, e.g. *.example.com, api.test.com)", Style::default().fg(Color::DarkGray)),
+        ]);
+        let widget = Paragraph::new(line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Proxy ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        frame.render_widget(widget, area);
+        return;
+    }
+
     let intercept_status = if app.intercept_enabled() {
         Span::styled(
             " INTERCEPT ON ",
@@ -155,7 +172,7 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
         if mode_label.is_empty() {
             " Edit Request (Enter:confirm Esc:cancel) ".to_string()
         } else {
-            format!(" Edit Request ({}) (Enter:confirm Esc:cancel) ", mode_label)
+            format!(" Edit Request ({}) (Enter:confirm q:cancel) ", mode_label)
         }
     };
 
@@ -175,7 +192,7 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
 fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
     let has_request = !app.intercept_ui.queue.is_empty();
 
-    let actions = if app.intercept_ui.editing || app.editing_bind_addr {
+    let actions = if app.intercept_ui.editing || app.editing_bind_addr || app.editing_scope {
         Line::from(vec![
             Span::styled(" Enter ", Style::default().fg(Color::Green).bold()),
             Span::raw("confirm  "),
@@ -206,6 +223,8 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw("edit  "),
             Span::styled(" b ", key_style()),
             Span::raw("bind  "),
+            Span::styled(" s ", key_style()),
+            Span::raw("scope  "),
             Span::styled(" C ", key_style()),
             Span::raw("cert  "),
             Span::styled(" j/k ", key_style()),
