@@ -1059,6 +1059,14 @@ impl App {
                 if !self.macros.show && self.repeater.original.is_some() => {
                     self.repeater.show_diff = !self.repeater.show_diff;
                 }
+            (KeyModifiers::NONE, KeyCode::Enter)
+                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running => {
+                    self.load_macro_step(true);
+                }
+            (KeyModifiers::NONE, KeyCode::Char('e'))
+                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running => {
+                    self.load_macro_step(false);
+                }
             (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
                 self.macros.show = !self.macros.show;
             }
@@ -1177,6 +1185,24 @@ impl App {
             self.repeater.req_scroll = 0;
             self.repeater.resp_scroll = 0;
             self.active_tab = Tab::Repeater;
+        }
+    }
+
+    fn load_macro_step(&mut self, send: bool) {
+        if let Some(step) = self.macros.steps.get(self.macros.selected) {
+            let req = &step.request;
+            self.repeater.editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
+            self.repeater.original = Some(req.clone());
+            self.repeater.response = None;
+            self.repeater.error = None;
+            self.repeater.pending = false;
+            self.repeater.editing = false;
+            self.repeater.req_scroll = 0;
+            self.repeater.resp_scroll = 0;
+            self.macros.show = false;
+            if send {
+                self.repeater_send();
+            }
         }
     }
 

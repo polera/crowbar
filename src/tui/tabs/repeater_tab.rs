@@ -289,7 +289,7 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(" Ctrl+Enter ", key_style()),
             Span::raw("send  "),
             Span::styled(" Esc ", key_style()),
-            Span::raw("stop editing  "),
+            Span::raw("exit  "),
             Span::styled(" arrows ", dim_style()),
             Span::raw("navigate"),
         ])
@@ -513,11 +513,23 @@ fn render_macro_actions(app: &App, frame: &mut Frame, area: Rect) {
 
     let line = Line::from(vec![
         if has_steps && !app.macros.running {
+            Span::styled(" Enter ", key_style())
+        } else {
+            Span::styled(" Enter ", dim_style())
+        },
+        Span::raw("send  "),
+        if has_steps && !app.macros.running {
+            Span::styled(" e ", key_style())
+        } else {
+            Span::styled(" e ", dim_style())
+        },
+        Span::raw("edit  "),
+        if has_steps && !app.macros.running {
             Span::styled(" Ctrl+Enter ", key_style())
         } else {
             Span::styled(" Ctrl+Enter ", dim_style())
         },
-        Span::raw("run  "),
+        Span::raw("run all  "),
         Span::styled(" M ", key_style()),
         Span::raw("repeater  "),
         if has_steps && !app.macros.running {
