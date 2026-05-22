@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::models::{EntryState, HistoryEntry, HttpVersion, RequestData, RequestId, ResponseData};
 
-pub fn load_file(path: &Path) -> anyhow::Result<Vec<HistoryEntry>> {
+pub fn load_file(path: &Path) -> anyhow::Result<super::session::Session> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -14,11 +14,11 @@ pub fn load_file(path: &Path) -> anyhow::Result<Vec<HistoryEntry>> {
         .to_lowercase();
 
     match ext.as_str() {
-        "har" => load_har(path),
+        "har" => load_har(path).map(|entries| super::session::Session::new(&entries, Vec::new())),
         "json" => {
             match super::session::load(path) {
-                Ok(entries) => Ok(entries),
-                Err(_) => load_har(path),
+                Ok(session) => Ok(session),
+                Err(_) => load_har(path).map(|entries| super::session::Session::new(&entries, Vec::new())),
             }
         }
         _ => super::session::load(path),

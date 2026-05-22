@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 use crate::http::models::{RequestData, ResponseData};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepState {
     Pending,
     Running,
@@ -8,7 +10,7 @@ pub enum StepState {
     Error,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SequenceStep {
     pub request: RequestData,
     pub response: Option<ResponseData>,

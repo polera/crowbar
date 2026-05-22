@@ -461,7 +461,8 @@ impl App {
                 return;
             }
         }
-        let session = crate::http::session::Session::from_entries(self.store.entries());
+        let macro_requests: Vec<_> = self.macros.steps.iter().map(|s| s.request.clone()).collect();
+        let session = crate::http::session::Session::new(self.store.entries(), macro_requests);
         match serde_json::to_string_pretty(&session) {
             Ok(json) => match std::fs::write(path, json) {
                 Ok(()) => {
@@ -514,12 +515,29 @@ impl App {
 
     pub fn load_session(&mut self, path: &std::path::Path) {
         match crate::http::import::load_file(path) {
-            Ok(entries) => {
-                self.store.load_entries(entries);
-                self.status_message = Some((
-                    format!("Loaded {} entries", self.store.len()),
-                    std::time::Instant::now(),
-                ));
+            Ok(session) => {
+                self.store.load_entries(session.entries);
+                if let Some(saved) = session.macros {
+                    self.macros.steps = saved
+                        .steps
+                        .into_iter()
+                        .map(SequenceStep::new)
+                        .collect();
+                    self.macros.selected = 0;
+                    self.macros.running = false;
+                    self.macros.current_step = 0;
+                }
+                let macro_count = self.macros.steps.len();
+                let msg = if macro_count > 0 {
+                    format!(
+                        "Loaded {} entries, {} macro steps",
+                        self.store.len(),
+                        macro_count
+                    )
+                } else {
+                    format!("Loaded {} entries", self.store.len())
+                };
+                self.status_message = Some((msg, std::time::Instant::now()));
             }
             Err(e) => {
                 self.status_message = Some((

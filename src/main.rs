@@ -254,7 +254,7 @@ fn handle_command(cmd: crate::config::Command) -> anyhow::Result<()> {
             Ok(())
         }
         crate::config::Command::Import { input, name } => {
-            let entries = crate::http::import::load_file(&input)?;
+            let session = crate::http::import::load_file(&input)?;
             let session_name = name.unwrap_or_else(|| {
                 input
                     .file_stem()
@@ -262,10 +262,15 @@ fn handle_command(cmd: crate::config::Command) -> anyhow::Result<()> {
                     .to_string_lossy()
                     .into_owned()
             });
-            let path = crate::http::session::save(&entries, &session_name)?;
+            let macro_requests = session
+                .macros
+                .map(|m| m.steps)
+                .unwrap_or_default();
+            let entry_count = session.entries.len();
+            let path = crate::http::session::save(&session.entries, macro_requests, &session_name)?;
             eprintln!(
                 "Imported {} entries from {} -> {}",
-                entries.len(),
+                entry_count,
                 input.display(),
                 path.display()
             );
