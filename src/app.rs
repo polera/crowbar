@@ -112,6 +112,14 @@ pub struct App {
     pub show_cert_info: bool,
     pub cert_export_editing: bool,
     pub cert_export_buffer: String,
+
+    // Session save dialog
+    pub show_save_dialog: bool,
+    pub save_buffer: String,
+    pub save_on_confirm_quit: bool,
+
+    // Quit confirmation
+    pub show_quit_confirm: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +238,10 @@ impl App {
             show_cert_info: false,
             cert_export_editing: false,
             cert_export_buffer: String::new(),
+            show_save_dialog: false,
+            save_buffer: String::new(),
+            save_on_confirm_quit: false,
+            show_quit_confirm: false,
         }
     }
 
@@ -245,6 +257,16 @@ impl App {
 
             if self.show_help {
                 self.show_help = false;
+                return;
+            }
+
+            if self.show_quit_confirm {
+                self.handle_quit_confirm_key(key);
+                return;
+            }
+
+            if self.show_save_dialog {
+                self.handle_save_dialog_key(key);
                 return;
             }
 
@@ -306,15 +328,35 @@ impl App {
         }
     }
 
+    fn handle_quit_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if !self.store.is_empty() {
+                    self.show_quit_confirm = false;
+                    self.open_save_dialog(true);
+                } else {
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.should_quit = true;
+            }
+            KeyCode::Esc => {
+                self.show_quit_confirm = false;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_global_key(&mut self, key: KeyEvent) -> bool {
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                self.should_quit = true;
+                self.show_quit_confirm = true;
                 true
             }
             (KeyModifiers::NONE, KeyCode::Char('q')) => {
                 if !self.history.detail_open {
-                    self.should_quit = true;
+                    self.show_quit_confirm = true;
                     return true;
                 }
                 false
@@ -352,7 +394,7 @@ impl App {
                 true
             }
             (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
-                self.save_session();
+                self.open_save_dialog(false);
                 true
             }
             (_, KeyCode::F(2)) => {
@@ -370,15 +412,71 @@ impl App {
         }
     }
 
-    fn save_session(&mut self) {
+    fn open_save_dialog(&mut self, quit_after: bool) {
         let name = crate::http::session::auto_save_name();
-        match crate::http::session::save(self.store.entries(), &name) {
-            Ok(path) => {
+        if let Ok(dir) = crate::http::session::sessions_dir() {
+            self.save_buffer = dir.join(format!("{}.json", name)).display().to_string();
+        } else {
+            self.save_buffer = format!("{}.json", name);
+        }
+        self.save_on_confirm_quit = quit_after;
+        self.show_save_dialog = true;
+    }
+
+    fn handle_save_dialog_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.show_save_dialog = false;
+                self.save_buffer.clear();
+                self.save_on_confirm_quit = false;
+            }
+            KeyCode::Enter => {
+                let path = std::path::PathBuf::from(self.save_buffer.trim());
+                self.show_save_dialog = false;
+                self.save_buffer.clear();
+                let quit_after = self.save_on_confirm_quit;
+                self.save_on_confirm_quit = false;
+                self.save_session_to(&path);
+                if quit_after {
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Char(c) => {
+                self.save_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                self.save_buffer.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn save_session_to(&mut self, path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
                 self.status_message = Some((
-                    format!("Saved to {}", path.display()),
+                    format!("Save failed: {}", e),
                     std::time::Instant::now(),
                 ));
+                return;
             }
+        }
+        let session = crate::http::session::Session::from_entries(self.store.entries());
+        match serde_json::to_string_pretty(&session) {
+            Ok(json) => match std::fs::write(path, json) {
+                Ok(()) => {
+                    self.status_message = Some((
+                        format!("Saved to {}", path.display()),
+                        std::time::Instant::now(),
+                    ));
+                }
+                Err(e) => {
+                    self.status_message = Some((
+                        format!("Save failed: {}", e),
+                        std::time::Instant::now(),
+                    ));
+                }
+            },
             Err(e) => {
                 self.status_message = Some((
                     format!("Save failed: {}", e),
@@ -1365,6 +1463,14 @@ impl App {
         if self.show_cert_info {
             self.render_cert_overlay(frame);
         }
+
+        if self.show_save_dialog {
+            self.render_save_dialog(frame);
+        }
+
+        if self.show_quit_confirm {
+            self.render_quit_confirm(frame);
+        }
     }
 
     fn render_tab_bar(&self, frame: &mut Frame, area: Rect) {
@@ -1612,6 +1718,103 @@ impl App {
                     .borders(Borders::ALL)
                     .title(" CA Certificate Export ")
                     .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(widget, popup);
+    }
+
+    fn render_save_dialog(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let width = 64.min(area.width.saturating_sub(4));
+        let height = 8.min(area.height.saturating_sub(2));
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = (area.height.saturating_sub(height)) / 2;
+        let popup = Rect::new(x, y, width, height);
+
+        let dim = Style::default().fg(Color::DarkGray);
+        let count = self.store.len();
+
+        let lines = vec![
+            Line::raw(""),
+            Line::from(format!(
+                "  Saving {} request{}.",
+                count,
+                if count == 1 { "" } else { "s" }
+            )),
+            Line::raw(""),
+            Line::from(vec![
+                Span::raw("  Path: "),
+                Span::styled(&self.save_buffer, Style::default().fg(Color::White)),
+                Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(Span::styled(
+                "  Enter to save, Esc to cancel",
+                dim,
+            )),
+        ];
+
+        frame.render_widget(Clear, popup);
+        let widget = Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Save Session ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(widget, popup);
+    }
+
+    fn render_quit_confirm(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let has_session = !self.store.is_empty();
+        let width = 44.min(area.width.saturating_sub(4));
+        let height = if has_session { 9 } else { 7 };
+        let height = height.min(area.height.saturating_sub(2));
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = (area.height.saturating_sub(height)) / 2;
+        let popup = Rect::new(x, y, width, height);
+
+        let key = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(Color::DarkGray);
+
+        let mut lines = vec![Line::raw("")];
+
+        if has_session {
+            let count = self.store.len();
+            lines.push(Line::from(format!(
+                "  Session has {} request{}.",
+                count,
+                if count == 1 { "" } else { "s" }
+            )));
+            lines.push(Line::raw("  Save before quitting?"));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled("  y", key),
+                Span::raw(" Save & Quit   "),
+                Span::styled("n", key),
+                Span::raw(" Quit   "),
+                Span::styled("Esc", key),
+                Span::raw(" Cancel"),
+            ]));
+        } else {
+            lines.push(Line::raw("  Quit Crowbar?"));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled("  y", key),
+                Span::raw(" Quit   "),
+                Span::styled("Esc", key),
+                Span::styled(" Cancel", dim),
+            ]));
+        }
+
+        frame.render_widget(Clear, popup);
+        let widget = Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Quit ")
+                    .border_style(Style::default().fg(Color::Red)),
             )
             .wrap(Wrap { trim: false });
         frame.render_widget(widget, popup);

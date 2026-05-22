@@ -57,7 +57,7 @@ pub async fn send_raw_request(request: RequestData) -> Result<ResponseData, Stri
 }
 
 async fn send_http(request: &RequestData) -> anyhow::Result<ResponseData> {
-    let host = &request.host;
+    let host = strip_port(&request.host);
     let port = extract_port(&request.uri).unwrap_or(80);
     let addr = format!("{}:{}", host, port);
 
@@ -93,7 +93,7 @@ async fn send_http(request: &RequestData) -> anyhow::Result<ResponseData> {
 }
 
 async fn send_https(request: &RequestData) -> anyhow::Result<ResponseData> {
-    let host = &request.host;
+    let host = strip_port(&request.host);
     let port = extract_port(&request.uri).unwrap_or(443);
     let addr = format!("{}:{}", host, port);
 
@@ -134,7 +134,7 @@ async fn send_https(request: &RequestData) -> anyhow::Result<ResponseData> {
 }
 
 async fn send_h2(request: &RequestData) -> anyhow::Result<ResponseData> {
-    let host = &request.host;
+    let host = strip_port(&request.host);
     let port = extract_port(&request.uri).unwrap_or(443);
     let addr = format!("{}:{}", host, port);
 
@@ -231,6 +231,14 @@ async fn parse_h2_response(
         trailers,
         duration: std::time::Duration::ZERO,
     })
+}
+
+fn strip_port(host: &str) -> &str {
+    if let Some(bracket) = host.find(']') {
+        // IPv6: [::1]:port
+        return &host[..bracket + 1];
+    }
+    host.split(':').next().unwrap_or(host)
 }
 
 fn extract_port(uri: &str) -> Option<u16> {
