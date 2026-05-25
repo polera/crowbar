@@ -452,14 +452,14 @@ impl App {
     }
 
     fn save_session_to(&mut self, path: &std::path::Path) {
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                self.status_message = Some((
-                    format!("Save failed: {}", e),
-                    std::time::Instant::now(),
-                ));
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            self.status_message = Some((
+                format!("Save failed: {}", e),
+                std::time::Instant::now(),
+            ));
+            return;
         }
         let macro_requests: Vec<_> = self.macros.steps.iter().map(|s| s.request.clone()).collect();
         let session = crate::http::session::Session::new(self.store.entries(), macro_requests);
