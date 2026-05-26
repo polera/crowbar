@@ -31,12 +31,21 @@ A terminal-based web security testing proxy built in Rust. Intercept, inspect, a
 - **WebSocket Support** — Intercept, relay, and display WebSocket text and binary frames with direction and timestamp tracking
 - **Scope Filtering** — Limit capture to specific hosts or wildcard domain patterns (e.g. `*.example.com`)
 - **Passive Scanning** — Flag common security issues: missing HSTS/CSP/X-Frame-Options/X-Content-Type-Options headers, server/X-Powered-By information disclosure, insecure cookie flags (Secure, HttpOnly, SameSite), 5xx errors, and stack trace detection (Java, Python, .NET, Go)
-- **Session Persistence** — Save (`Ctrl+S`) and load sessions to pick up where you left off; auto-generated timestamped session names
+- **Session Persistence** — Save (`Ctrl+S`) and load sessions to pick up where you left off; auto-generated timestamped session names; repeater macros are persisted with the session
 - **Import/Export** — Import HAR files; export as curl commands, raw HTTP, or HAR (HTTP Archive 1.2)
 - **Encoding Tools** — Built-in URL, Base64, and Hex encode/decode utilities with real-time output and clipboard copy
 - **Editor Modes** — Choose between a standard editor and Vim-style keybindings (with normal/insert modes, motions, and operators); toggle with `F2` or set via config/CLI
 - **Multi-Instance Support** — Run multiple Crowbar instances simultaneously; automatic port selection finds the next available port if the default is occupied
 - **Runtime Reconfiguration** — Change the proxy bind address and scope patterns without restarting
+
+## Supported Platforms
+
+| OS | Architecture |
+|----|-------------|
+| Linux | x86_64, aarch64 (static musl) |
+| macOS | x86_64, aarch64 (Apple Silicon) |
+| FreeBSD | x86_64, aarch64 |
+| OpenBSD | x86_64, aarch64 |
 
 ## Installation
 
@@ -47,6 +56,21 @@ cargo build --release
 ```
 
 The binary is at `target/release/crowbar`.
+
+### Cross-Compilation
+
+Use [cross](https://github.com/cross-rs/cross) via the Makefile to build for all supported targets:
+
+```sh
+# Build all platforms
+make release
+
+# Build a specific target
+make linux-amd64
+make macos-arm64
+```
+
+Binaries are placed in `dist/` as `crowbar-<version>-<os>-<arch>`.
 
 ## Usage
 
@@ -250,6 +274,21 @@ Set the initial editor mode via CLI (`--editor-mode vim`) or config file (`edito
 | `~/.crowbar/rules/` | Exported/imported rule sets (JSON) |
 | `~/.crowbar/exports/` | Exported data (HAR, curl, raw HTTP) |
 | `~/.crowbar/crowbar.log` | Application log |
+
+## Development
+
+```sh
+# Run all checks (clippy + cargo audit)
+make checks
+
+# Run clippy lints only
+make lint
+
+# Clean build artifacts
+make clean
+```
+
+CI runs clippy and `cargo audit` on every push and pull request to `main`.
 
 ## License
 
