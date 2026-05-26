@@ -5,9 +5,17 @@ use crate::scanning::Finding;
 use super::models::{EntryState, GrpcMessage, HistoryEntry, RequestData, RequestId, ResponseData, WsMessage};
 
 #[derive(Default)]
+struct FilterCache {
+    filter: String,
+    indices: Vec<usize>,
+    entry_count: usize,
+}
+
+#[derive(Default)]
 pub struct InMemoryStore {
     entries: Vec<HistoryEntry>,
     index: HashMap<RequestId, usize>,
+    filter_cache: FilterCache,
 }
 
 impl InMemoryStore {
@@ -88,18 +96,55 @@ impl InMemoryStore {
         }
     }
 
+    pub fn get(&self, id: RequestId) -> Option<&HistoryEntry> {
+        self.index.get(&id).and_then(|&idx| self.entries.get(idx))
+    }
+
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
     }
 
-    pub fn filtered_entries(&self, filter: &str) -> Vec<&HistoryEntry> {
-        if filter.is_empty() {
-            return self.entries.iter().collect();
+    pub fn refresh_filter_cache(&mut self, filter: &str) {
+        let cache = &self.filter_cache;
+        if cache.filter == filter && cache.entry_count == self.entries.len() {
+            return;
         }
-        let filter_lower = filter.to_lowercase();
-        self.entries
+
+        let indices = if filter.is_empty() {
+            (0..self.entries.len()).collect()
+        } else {
+            let filter_lower = filter.to_lowercase();
+            self.entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.matches_filter(&filter_lower))
+                .map(|(i, _)| i)
+                .collect()
+        };
+
+        self.filter_cache = FilterCache {
+            filter: filter.to_string(),
+            indices,
+            entry_count: self.entries.len(),
+        };
+    }
+
+    pub fn filtered_count(&self) -> usize {
+        self.filter_cache.indices.len()
+    }
+
+    pub fn filtered_entry(&self, filtered_idx: usize) -> Option<&HistoryEntry> {
+        self.filter_cache
+            .indices
+            .get(filtered_idx)
+            .and_then(|&i| self.entries.get(i))
+    }
+
+    pub fn filtered_entries_all(&self) -> Vec<&HistoryEntry> {
+        self.filter_cache
+            .indices
             .iter()
-            .filter(|entry| entry.matches_filter(&filter_lower))
+            .filter_map(|&i| self.entries.get(i))
             .collect()
     }
 

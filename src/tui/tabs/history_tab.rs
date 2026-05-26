@@ -9,7 +9,7 @@ use crate::http::models::EntryState;
 use crate::tui::widgets::{body_view, logo};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
-    let filtered = app.store.filtered_entries(&app.history.filter);
+    let filtered = app.store.filtered_entries_all();
 
     if app.store.is_empty() {
         let block = Block::default()

@@ -769,8 +769,8 @@ impl App {
     }
 
     fn handle_history_key(&mut self, key: KeyEvent) {
-        let filtered = self.store.filtered_entries(&self.history.filter);
-        let entry_count = filtered.len();
+        self.store.refresh_filter_cache(&self.history.filter);
+        let entry_count = self.store.filtered_count();
 
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -819,27 +819,30 @@ impl App {
                 }
             KeyCode::Char('c') => {
                 if entry_count > 0
-                    && let Some(entry) = filtered.get(self.history.selected) {
+                    && let Some(entry) = self.store.filtered_entry(self.history.selected) {
                         let curl = crate::http::export::to_curl(entry);
                         self.export_to_file("curl", "sh", &curl);
                     }
             }
             KeyCode::Char('w') => {
                 if entry_count > 0
-                    && let Some(entry) = filtered.get(self.history.selected) {
+                    && let Some(entry) = self.store.filtered_entry(self.history.selected) {
                         let raw = crate::http::export::to_raw(entry);
                         self.export_to_file("raw", "txt", &raw);
                     }
             }
             KeyCode::Char('h')
                 if !self.history.detail_open => {
-                    let entries: Vec<_> = filtered.iter().map(|e| (*e).clone()).collect();
+                    let entries: Vec<_> = self.store.filtered_entries_all()
+                        .into_iter()
+                        .cloned()
+                        .collect();
                     let har = crate::http::export::to_har(&entries);
                     self.export_to_file("har", "har", &har);
                 }
             KeyCode::Char('m') => {
                 if entry_count > 0
-                    && let Some(entry) = filtered.get(self.history.selected) {
+                    && let Some(entry) = self.store.filtered_entry(self.history.selected) {
                         self.macros.steps.push(SequenceStep::new(entry.request.clone()));
                         self.status_message = Some((
                             format!("Added to macro ({} steps)", self.macros.steps.len()),
@@ -1289,8 +1292,8 @@ impl App {
     }
 
     fn send_to_repeater(&mut self) {
-        let filtered = self.store.filtered_entries(&self.history.filter);
-        if let Some(entry) = filtered.get(self.history.selected) {
+        self.store.refresh_filter_cache(&self.history.filter);
+        if let Some(entry) = self.store.filtered_entry(self.history.selected) {
             let req = &entry.request;
             self.repeater.editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
             self.repeater.original = Some(req.clone());
@@ -1406,7 +1409,7 @@ impl App {
                 }
             }
             ProxyToUi::ResponseReceived(id, resp) => {
-                if let Some(entry) = self.store.entries().iter().find(|e| e.request.id == id) {
+                if let Some(entry) = self.store.get(id) {
                     let findings = crate::scanning::scan_response(&entry.request, &resp);
                     self.store.update_response(id, resp);
                     if !findings.is_empty() {
@@ -1460,6 +1463,10 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn prepare_render(&mut self) {
+        self.store.refresh_filter_cache(&self.history.filter);
     }
 
     pub fn render(&self, frame: &mut Frame) {

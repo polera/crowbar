@@ -161,6 +161,7 @@ async fn run_app(
     cancel: &mut CancellationToken,
 ) -> anyhow::Result<()> {
     loop {
+        app.prepare_render();
         tui.draw(|frame| app.render(frame))?;
 
         match events.next().await {
