@@ -1,5 +1,6 @@
 pub mod persist;
 
+use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
@@ -158,29 +159,36 @@ fn apply_rule(
     let scope = rule.scope;
 
     if let Some(uri) = uri
-        && (scope == RuleScope::Url || scope == RuleScope::All) {
-            *uri = replace_in_str(uri, &rule.match_pattern, &rule.replacement, compiled);
+        && (scope == RuleScope::Url || scope == RuleScope::All)
+        && let Cow::Owned(s) = replace_in_str(uri, &rule.match_pattern, &rule.replacement, compiled) {
+            *uri = s;
         }
 
     if scope == RuleScope::Headers || scope == RuleScope::All {
         for (_key, value) in headers.iter_mut() {
-            *value = replace_in_str(value, &rule.match_pattern, &rule.replacement, compiled);
+            if let Cow::Owned(s) = replace_in_str(value, &rule.match_pattern, &rule.replacement, compiled) {
+                *value = s;
+            }
         }
     }
 
     if (scope == RuleScope::Body || scope == RuleScope::All)
-        && let Ok(text) = std::str::from_utf8(body) {
-            let replaced = replace_in_str(text, &rule.match_pattern, &rule.replacement, compiled);
-            if replaced != text {
-                *body = Bytes::from(replaced);
-            }
+        && let Ok(text) = std::str::from_utf8(body)
+        && let Cow::Owned(s) = replace_in_str(text, &rule.match_pattern, &rule.replacement, compiled) {
+            *body = Bytes::from(s);
         }
 }
 
-fn replace_in_str(input: &str, pattern: &str, replacement: &str, compiled: Option<&Regex>) -> String {
+fn replace_in_str<'a>(input: &'a str, pattern: &str, replacement: &str, compiled: Option<&Regex>) -> Cow<'a, str> {
     match compiled {
-        Some(re) => re.replace_all(input, replacement).to_string(),
-        None => input.replace(pattern, replacement),
+        Some(re) => re.replace_all(input, replacement),
+        None => {
+            if input.contains(pattern) {
+                Cow::Owned(input.replace(pattern, replacement))
+            } else {
+                Cow::Borrowed(input)
+            }
+        }
     }
 }
 

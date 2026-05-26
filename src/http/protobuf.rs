@@ -184,15 +184,10 @@ fn interpret_length_delimited(data: &[u8], depth: usize) -> ProtoValue {
 }
 
 fn is_likely_text(s: &str) -> bool {
-    let total = s.chars().count();
-    if total == 0 {
-        return false;
-    }
-    let printable = s
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\n' || *c == '\r' || *c == '\t')
-        .count();
-    printable * 4 >= total * 3
+    let (total, printable) = s.chars().fold((0usize, 0usize), |(t, p), c| {
+        (t + 1, p + usize::from(c.is_ascii_graphic() || c.is_ascii_whitespace()))
+    });
+    total > 0 && (printable * 100 / total) >= 90
 }
 
 pub fn format_fixed64(value: u64) -> String {

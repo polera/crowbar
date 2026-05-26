@@ -140,12 +140,15 @@ impl InMemoryStore {
             .and_then(|&i| self.entries.get(i))
     }
 
-    pub fn filtered_entries_all(&self) -> Vec<&HistoryEntry> {
+    pub fn filtered_entries_iter(&self) -> impl Iterator<Item = &HistoryEntry> {
         self.filter_cache
             .indices
             .iter()
             .filter_map(|&i| self.entries.get(i))
-            .collect()
+    }
+
+    pub fn filtered_entries_all(&self) -> Vec<&HistoryEntry> {
+        self.filtered_entries_iter().collect()
     }
 
     pub fn load_entries(&mut self, entries: Vec<HistoryEntry>) {

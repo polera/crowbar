@@ -111,7 +111,7 @@ fn check_cookie_flags(
     findings: &mut Vec<Finding>,
 ) {
     for cookie in get_headers(&response.headers, "set-cookie") {
-        let lower = cookie.to_lowercase();
+        let lower = cookie.to_ascii_lowercase();
 
         if request.is_tls && !lower.contains("secure") {
             findings.push(Finding {

@@ -788,8 +788,7 @@ impl App {
             }
             KeyCode::Char('h')
                 if !self.history.detail_open => {
-                    let entries: Vec<_> = self.store.filtered_entries_all()
-                        .into_iter()
+                    let entries: Vec<_> = self.store.filtered_entries_iter()
                         .cloned()
                         .collect();
                     let har = crate::http::export::to_har(&entries);

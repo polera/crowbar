@@ -79,7 +79,7 @@ fn is_data_frame(opcode: u8) -> bool {
     opcode == 1 || opcode == 2
 }
 
-fn try_parse_frame(buf: &mut BytesMut) -> Option<(Vec<u8>, u8, Vec<u8>)> {
+fn try_parse_frame(buf: &mut BytesMut) -> Option<(Bytes, u8, Vec<u8>)> {
     if buf.len() < 2 {
         return None;
     }
@@ -132,5 +132,5 @@ fn try_parse_frame(buf: &mut BytesMut) -> Option<(Vec<u8>, u8, Vec<u8>)> {
         }
     }
 
-    Some((raw.to_vec(), opcode, payload))
+    Some((raw.freeze(), opcode, payload))
 }

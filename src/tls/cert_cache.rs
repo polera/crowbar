@@ -22,14 +22,26 @@ impl CertCache {
     }
 
     pub async fn get_or_generate(&self, hostname: &str) -> anyhow::Result<Arc<CertifiedKey>> {
-        let mut cache = self.cache.lock().await;
-
-        if let Some(key) = cache.get(hostname) {
-            return Ok(Arc::clone(key));
+        // Phase 1: Check cache under lock
+        {
+            let mut cache = self.cache.lock().await;
+            if let Some(key) = cache.get(hostname) {
+                return Ok(Arc::clone(key));
+            }
         }
+        // Lock released here — other hostnames can proceed concurrently
 
+        // Phase 2: Generate cert without holding the lock (CPU-intensive)
         let certified_key = Arc::new(cert_gen::generate_leaf_cert(hostname, &self.ca)?);
-        cache.put(hostname.to_string(), Arc::clone(&certified_key));
+
+        // Phase 3: Re-acquire lock and insert.
+        // A concurrent request for the same hostname may have already inserted;
+        // overwriting with an equivalent cert is harmless and simpler than
+        // coordinating with a per-host lock or futures map.
+        {
+            let mut cache = self.cache.lock().await;
+            cache.put(hostname.to_string(), Arc::clone(&certified_key));
+        }
 
         Ok(certified_key)
     }

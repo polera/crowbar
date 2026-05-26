@@ -18,9 +18,7 @@ pub fn request_to_lines(req: &RequestData) -> Vec<String> {
             let messages = protobuf::decode_grpc_body(&req.body);
             if messages.len() == 1 {
                 if let Some(fields) = &messages[0].fields {
-                    for line in protobuf::format_proto_text(fields, 0) {
-                        lines.push(line);
-                    }
+                    lines.extend(protobuf::format_proto_text(fields, 0));
                 } else {
                     lines.push(format!("[binary: {} bytes]", req.body.len()));
                 }
@@ -30,9 +28,7 @@ pub fn request_to_lines(req: &RequestData) -> Vec<String> {
                         lines.push("---".to_string());
                     }
                     if let Some(fields) = &msg.fields {
-                        for line in protobuf::format_proto_text(fields, 0) {
-                            lines.push(line);
-                        }
+                        lines.extend(protobuf::format_proto_text(fields, 0));
                     } else {
                         let payload_len = msg.size;
                         lines.push(format!("[binary: {} bytes]", payload_len));
@@ -40,9 +36,7 @@ pub fn request_to_lines(req: &RequestData) -> Vec<String> {
                 }
             }
         } else if let Ok(text) = std::str::from_utf8(&req.body) {
-            for line in text.lines() {
-                lines.push(line.to_string());
-            }
+            lines.extend(text.lines().map(String::from));
         } else {
             lines.push(format!("[binary: {} bytes]", req.body.len()));
         }
