@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     let intercept = Arc::new(InterceptState::new(config.intercept));
     let scope = Arc::new(Scope::new(config.scope));
 
-    let rules: SharedRules = Arc::new(std::sync::RwLock::new(Vec::new()));
+    let rules: SharedRules = Arc::new(parking_lot::RwLock::new(Vec::new()));
 
     let mut cancel = CancellationToken::new();
 

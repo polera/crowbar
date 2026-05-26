@@ -751,38 +751,66 @@ async fn handle_h2_request(
     let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
 
     if is_grpc {
-        let duration = start.elapsed();
-
-        if in_scope {
-            let response_data = ResponseData {
-                status: resp_status,
-                reason: crate::http::models::status_reason(resp_status).to_string(),
-                version: HttpVersion::Http2,
-                headers: resp_headers.clone(),
-                body: Bytes::new(),
-                trailers: Vec::new(),
-                duration,
-            };
-            let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
-        }
-
-        let (_, resp_body_incoming) = upstream_resp.into_parts();
-        let resp_tee = GrpcTeeBody {
-            inner: resp_body_incoming,
-            request_id,
-            direction: GrpcDirection::ServerToClient,
-            ui_tx: ctx.ui_tx.clone(),
-            buffer: BytesMut::new(),
-            in_scope,
-        };
-
-        let mut response = hyper::Response::builder().status(resp_status);
-        for (key, value) in &resp_headers {
-            response = response.header(key.as_str(), value.as_str());
-        }
-        return Ok(response.body(H2RespBody::Streaming(resp_tee)).unwrap());
+        return Ok(build_grpc_response(
+            upstream_resp, resp_status, resp_headers, start, request_id, in_scope, ctx,
+        ));
     }
 
+    build_buffered_response(
+        upstream_resp, resp_status, resp_headers, start, request_id, in_scope, ctx,
+    ).await
+}
+
+fn build_grpc_response(
+    upstream_resp: hyper::Response<Incoming>,
+    resp_status: u16,
+    resp_headers: Vec<(String, String)>,
+    start: Instant,
+    request_id: RequestId,
+    in_scope: bool,
+    ctx: &ProxyContext,
+) -> hyper::Response<H2RespBody> {
+    let duration = start.elapsed();
+
+    if in_scope {
+        let response_data = ResponseData {
+            status: resp_status,
+            reason: crate::http::models::status_reason(resp_status).to_string(),
+            version: HttpVersion::Http2,
+            headers: resp_headers.clone(),
+            body: Bytes::new(),
+            trailers: Vec::new(),
+            duration,
+        };
+        let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+    }
+
+    let (_, resp_body_incoming) = upstream_resp.into_parts();
+    let resp_tee = GrpcTeeBody {
+        inner: resp_body_incoming,
+        request_id,
+        direction: GrpcDirection::ServerToClient,
+        ui_tx: ctx.ui_tx.clone(),
+        buffer: BytesMut::new(),
+        in_scope,
+    };
+
+    let mut response = hyper::Response::builder().status(resp_status);
+    for (key, value) in &resp_headers {
+        response = response.header(key.as_str(), value.as_str());
+    }
+    response.body(H2RespBody::Streaming(resp_tee)).unwrap()
+}
+
+async fn build_buffered_response(
+    upstream_resp: hyper::Response<Incoming>,
+    resp_status: u16,
+    resp_headers: Vec<(String, String)>,
+    start: Instant,
+    request_id: RequestId,
+    in_scope: bool,
+    ctx: &ProxyContext,
+) -> Result<hyper::Response<H2RespBody>, Infallible> {
     let (_, resp_body_incoming) = upstream_resp.into_parts();
     let collected = match resp_body_incoming.collect().await {
         Ok(c) => c,

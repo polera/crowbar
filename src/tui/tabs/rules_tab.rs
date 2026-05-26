@@ -13,7 +13,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     ])
     .split(area);
 
-    let rules = app.rules.read().unwrap();
+    let rules = app.rules.read();
 
     if rules.is_empty() {
         let msg = Paragraph::new(Line::styled(

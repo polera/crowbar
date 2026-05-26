@@ -476,7 +476,7 @@ impl App {
     }
 
     fn export_rules(&mut self) {
-        let rules = self.rules.read().unwrap().clone();
+        let rules = self.rules.read().clone();
         if rules.is_empty() {
             self.set_status("No rules to export");
             return;
@@ -831,20 +831,20 @@ impl App {
     }
 
     fn handle_rules_key(&mut self, key: KeyEvent) {
-        let rules = self.rules.read().unwrap();
+        let rules = self.rules.read();
         let count = rules.len();
         drop(rules);
 
         match key.code {
             KeyCode::Char('a') => {
-                let mut rules = self.rules.write().unwrap();
+                let mut rules = self.rules.write();
                 let name = format!("Rule {}", rules.len() + 1);
                 rules.push(crate::rules::Rule::new(name));
                 self.rules_ui.selected = rules.len() - 1;
             }
             KeyCode::Char('x')
                 if count > 0 => {
-                    let mut rules = self.rules.write().unwrap();
+                    let mut rules = self.rules.write();
                     rules.remove(self.rules_ui.selected);
                     if self.rules_ui.selected >= rules.len() && !rules.is_empty() {
                         self.rules_ui.selected = rules.len() - 1;
@@ -852,42 +852,42 @@ impl App {
                 }
             KeyCode::Enter
                 if count > 0 => {
-                    let mut rules = self.rules.write().unwrap();
+                    let mut rules = self.rules.write();
                     rules[self.rules_ui.selected].enabled = !rules[self.rules_ui.selected].enabled;
                 }
             KeyCode::Char('t')
                 if count > 0 => {
-                    let mut rules = self.rules.write().unwrap();
+                    let mut rules = self.rules.write();
                     rules[self.rules_ui.selected].target = rules[self.rules_ui.selected].target.next();
                 }
             KeyCode::Char('s')
                 if count > 0 => {
-                    let mut rules = self.rules.write().unwrap();
+                    let mut rules = self.rules.write();
                     rules[self.rules_ui.selected].scope = rules[self.rules_ui.selected].scope.next();
                 }
             KeyCode::Char('R')
                 if count > 0 => {
-                    let mut rules = self.rules.write().unwrap();
+                    let mut rules = self.rules.write();
                     rules[self.rules_ui.selected].is_regex = !rules[self.rules_ui.selected].is_regex;
                     rules[self.rules_ui.selected].invalidate_regex();
                 }
             KeyCode::Char('n')
                 if count > 0 => {
-                    let rules = self.rules.read().unwrap();
+                    let rules = self.rules.read();
                     self.rules_ui.edit_buffer = rules[self.rules_ui.selected].name.clone();
                     drop(rules);
                     self.rules_ui.editing_field = Some(RuleField::Name);
                 }
             KeyCode::Char('p')
                 if count > 0 => {
-                    let rules = self.rules.read().unwrap();
+                    let rules = self.rules.read();
                     self.rules_ui.edit_buffer = rules[self.rules_ui.selected].match_pattern.clone();
                     drop(rules);
                     self.rules_ui.editing_field = Some(RuleField::Pattern);
                 }
             KeyCode::Char('e')
                 if count > 0 => {
-                    let rules = self.rules.read().unwrap();
+                    let rules = self.rules.read();
                     self.rules_ui.edit_buffer = rules[self.rules_ui.selected].replacement.clone();
                     drop(rules);
                     self.rules_ui.editing_field = Some(RuleField::Replacement);
@@ -926,7 +926,7 @@ impl App {
                 match crate::rules::persist::load(&expanded) {
                     Ok(imported) => {
                         let count = imported.len();
-                        self.rules.write().unwrap().extend(imported);
+                        self.rules.write().extend(imported);
                         self.set_status(format!("Imported {} rules from {}", count, expanded.display()));
                     }
                     Err(e) => {
@@ -954,7 +954,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(field) = self.rules_ui.editing_field {
-                    let mut rules = self.rules.write().unwrap();
+                    let mut rules = self.rules.write();
                     if self.rules_ui.selected < rules.len() {
                         match field {
                             RuleField::Name => {

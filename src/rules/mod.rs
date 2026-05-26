@@ -1,6 +1,8 @@
 pub mod persist;
 
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
+
+use parking_lot::RwLock;
 
 use bytes::Bytes;
 use regex::Regex;
@@ -117,7 +119,7 @@ pub fn apply_request_rules(
     headers: &mut [(String, String)],
     body: &mut Bytes,
 ) {
-    let rules = rules.read().unwrap();
+    let rules = rules.read();
     rules
         .iter()
         .filter(|r| r.enabled)
@@ -130,7 +132,7 @@ pub fn apply_response_rules(
     headers: &mut [(String, String)],
     body: &mut Bytes,
 ) {
-    let rules = rules.read().unwrap();
+    let rules = rules.read();
     rules
         .iter()
         .filter(|r| r.enabled)

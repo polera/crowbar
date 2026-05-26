@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 pub struct Scope {
     patterns: RwLock<Vec<String>>,
@@ -12,7 +12,7 @@ impl Scope {
     }
 
     pub fn is_in_scope(&self, host: &str) -> bool {
-        let patterns = self.patterns.read().unwrap();
+        let patterns = self.patterns.read();
         if patterns.is_empty() {
             return true;
         }
@@ -21,11 +21,11 @@ impl Scope {
     }
 
     pub fn patterns(&self) -> Vec<String> {
-        self.patterns.read().unwrap().clone()
+        self.patterns.read().clone()
     }
 
     pub fn set_patterns(&self, patterns: Vec<String>) {
-        *self.patterns.write().unwrap() = patterns;
+        *self.patterns.write() = patterns;
     }
 }
 
