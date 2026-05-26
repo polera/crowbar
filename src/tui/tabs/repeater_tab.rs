@@ -74,18 +74,17 @@ fn render_request_editor(app: &App, frame: &mut Frame, area: Rect) {
         );
 
         if app.repeater.editing && i == app.repeater.editor.cursor_line {
-            let col = app.repeater.editor.cursor_col.min(line.len());
-            let before = &line[..col];
-            let cursor_char = if col < line.len() {
-                &line[col..col + 1]
+            let char_indices: Vec<(usize, char)> = line.char_indices().collect();
+            let col = app.repeater.editor.cursor_col.min(char_indices.len());
+            let byte_start = char_indices.get(col).map_or(line.len(), |&(i, _)| i);
+            let byte_end = char_indices.get(col + 1).map_or(line.len(), |&(i, _)| i);
+            let before = &line[..byte_start];
+            let cursor_char = if byte_start < line.len() {
+                &line[byte_start..byte_end]
             } else {
                 " "
             };
-            let after = if col + 1 < line.len() {
-                &line[col + 1..]
-            } else {
-                ""
-            };
+            let after = &line[byte_end..];
 
             lines.push(Line::from(vec![
                 num_span,

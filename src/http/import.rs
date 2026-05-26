@@ -18,7 +18,8 @@ pub fn load_file(path: &Path) -> anyhow::Result<super::session::Session> {
         "json" => {
             match super::session::load(path) {
                 Ok(session) => Ok(session),
-                Err(_) => load_har(path).map(|entries| super::session::Session::new(entries, Vec::new())),
+                Err(session_err) => load_har(path).map(|entries| super::session::Session::new(entries, Vec::new()))
+                    .map_err(|har_err| anyhow::anyhow!("Failed as session ({session_err}) and as HAR ({har_err})")),
             }
         }
         _ => super::session::load(path),

@@ -471,7 +471,7 @@ fn render_ws_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry]
 
         let preview = if let Some(text) = msg.text() {
             let truncated: String = text.chars().take(120).collect();
-            if text.len() > 120 {
+            if truncated.len() < text.len() {
                 format!("{truncated}...")
             } else {
                 truncated

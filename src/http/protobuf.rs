@@ -68,8 +68,14 @@ pub fn decode_grpc_body(data: &[u8]) -> Vec<GrpcMessage> {
     messages
 }
 
+const MAX_DECODE_DEPTH: usize = 16;
+
 pub fn decode_raw(data: &[u8]) -> Option<Vec<ProtoField>> {
-    if data.is_empty() {
+    decode_raw_inner(data, 0)
+}
+
+fn decode_raw_inner(data: &[u8], depth: usize) -> Option<Vec<ProtoField>> {
+    if data.is_empty() || depth > MAX_DECODE_DEPTH {
         return None;
     }
 
@@ -118,7 +124,7 @@ pub fn decode_raw(data: &[u8]) -> Option<Vec<ProtoField>> {
                 pos += len;
                 fields.push(ProtoField {
                     number: field_number,
-                    value: interpret_length_delimited(payload),
+                    value: interpret_length_delimited(payload, depth),
                 });
             }
             5 => {
@@ -162,14 +168,14 @@ fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
-fn interpret_length_delimited(data: &[u8]) -> ProtoValue {
+fn interpret_length_delimited(data: &[u8], depth: usize) -> ProtoValue {
     if let Ok(s) = std::str::from_utf8(data)
         && !s.is_empty() && is_likely_text(s) {
             return ProtoValue::String(s.to_string());
         }
 
     if data.len() >= 2
-        && let Some(fields) = decode_raw(data)
+        && let Some(fields) = decode_raw_inner(data, depth + 1)
             && fields.iter().all(|f| f.number < 1000) {
                 return ProtoValue::Message(fields);
             }
