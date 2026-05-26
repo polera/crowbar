@@ -402,10 +402,7 @@ impl App {
                 self.tools.editor.set_mode(self.editor_mode);
                 self.intercept_ui.editor.set_mode(self.editor_mode);
                 self.repeater.editor.set_mode(self.editor_mode);
-                self.status_message = Some((
-                    format!("Editor mode: {}", self.editor_mode.label()),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Editor mode: {}", self.editor_mode.label()));
                 true
             }
             _ => false,
@@ -455,34 +452,22 @@ impl App {
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
-            self.status_message = Some((
-                format!("Save failed: {}", e),
-                std::time::Instant::now(),
-            ));
+            self.set_status(format!("Save failed: {}", e));
             return;
         }
         let macro_requests: Vec<_> = self.macros.steps.iter().map(|s| s.request.clone()).collect();
-        let session = crate::http::session::Session::new(self.store.entries(), macro_requests);
+        let session = crate::http::session::Session::new(self.store.entries().to_vec(), macro_requests);
         match serde_json::to_string_pretty(&session) {
             Ok(json) => match std::fs::write(path, json) {
                 Ok(()) => {
-                    self.status_message = Some((
-                        format!("Saved to {}", path.display()),
-                        std::time::Instant::now(),
-                    ));
+                    self.set_status(format!("Saved to {}", path.display()));
                 }
                 Err(e) => {
-                    self.status_message = Some((
-                        format!("Save failed: {}", e),
-                        std::time::Instant::now(),
-                    ));
+                    self.set_status(format!("Save failed: {}", e));
                 }
             },
             Err(e) => {
-                self.status_message = Some((
-                    format!("Save failed: {}", e),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Save failed: {}", e));
             }
         }
     }
@@ -490,25 +475,16 @@ impl App {
     fn export_rules(&mut self) {
         let rules = self.rules.read().unwrap().clone();
         if rules.is_empty() {
-            self.status_message = Some((
-                "No rules to export".into(),
-                std::time::Instant::now(),
-            ));
+            self.set_status("No rules to export");
             return;
         }
         let name = crate::rules::persist::auto_save_name();
         match crate::rules::persist::save(&rules, &name) {
             Ok(path) => {
-                self.status_message = Some((
-                    format!("Exported {} rules to {}", rules.len(), path.display()),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Exported {} rules to {}", rules.len(), path.display()));
             }
             Err(e) => {
-                self.status_message = Some((
-                    format!("Export failed: {}", e),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Export failed: {}", e));
             }
         }
     }
@@ -537,13 +513,10 @@ impl App {
                 } else {
                     format!("Loaded {} entries", self.store.len())
                 };
-                self.status_message = Some((msg, std::time::Instant::now()));
+                self.set_status(msg);
             }
             Err(e) => {
-                self.status_message = Some((
-                    format!("Load failed: {}", e),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Load failed: {}", e));
             }
         }
     }
@@ -620,10 +593,7 @@ impl App {
                         self.bind_addr_buffer.clear();
                     }
                     Err(_) => {
-                        self.status_message = Some((
-                            format!("Invalid address: {}", input),
-                            std::time::Instant::now(),
-                        ));
+                        self.set_status(format!("Invalid address: {}", input));
                         self.editing_bind_addr = false;
                         self.bind_addr_buffer.clear();
                     }
@@ -656,14 +626,11 @@ impl App {
                 self.scope.set_patterns(patterns);
                 self.editing_scope = false;
                 self.scope_buffer.clear();
-                self.status_message = Some((
-                    if count == 0 {
-                        "Scope cleared — capturing all traffic".to_string()
-                    } else {
-                        format!("Scope updated ({} pattern{})", count, if count == 1 { "" } else { "s" })
-                    },
-                    std::time::Instant::now(),
-                ));
+                self.set_status(if count == 0 {
+                    "Scope cleared — capturing all traffic".to_string()
+                } else {
+                    format!("Scope updated ({} pattern{})", count, if count == 1 { "" } else { "s" })
+                });
             }
             KeyCode::Char(c) => {
                 self.scope_buffer.push(c);
@@ -720,30 +687,21 @@ impl App {
         let ca_dir = match dirs::home_dir() {
             Some(h) => h.join(".crowbar"),
             None => {
-                self.status_message = Some((
-                    "Cannot find home directory".to_string(),
-                    std::time::Instant::now(),
-                ));
+                self.set_status("Cannot find home directory");
                 return;
             }
         };
         let cert_path = ca_dir.join("ca.pem");
 
         if !cert_path.exists() {
-            self.status_message = Some((
-                "No CA certificate found — restart crowbar to generate one".to_string(),
-                std::time::Instant::now(),
-            ));
+            self.set_status("No CA certificate found — restart crowbar to generate one");
             return;
         }
 
         let pem = match std::fs::read_to_string(&cert_path) {
             Ok(p) => p,
             Err(e) => {
-                self.status_message = Some((
-                    format!("Failed to read CA cert: {}", e),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Failed to read CA cert: {}", e));
                 return;
             }
         };
@@ -754,16 +712,10 @@ impl App {
                 let abs = std::path::Path::new(dest)
                     .canonicalize()
                     .unwrap_or_else(|_| std::path::PathBuf::from(dest));
-                self.status_message = Some((
-                    format!("CA certificate exported to {}", abs.display()),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("CA certificate exported to {}", abs.display()));
             }
             Err(e) => {
-                self.status_message = Some((
-                    format!("Export failed: {}", e),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Export failed: {}", e));
             }
         }
     }
@@ -844,10 +796,7 @@ impl App {
                 if entry_count > 0
                     && let Some(entry) = self.store.filtered_entry(self.history.selected) {
                         self.macros.steps.push(SequenceStep::new(entry.request.clone()));
-                        self.status_message = Some((
-                            format!("Added to macro ({} steps)", self.macros.steps.len()),
-                            std::time::Instant::now(),
-                        ));
+                        self.set_status(format!("Added to macro ({} steps)", self.macros.steps.len()));
                     }
             }
             _ => {}
@@ -860,10 +809,7 @@ impl App {
             .join(".crowbar")
             .join("exports");
         if std::fs::create_dir_all(&dir).is_err() {
-            self.status_message = Some((
-                "Failed to create exports directory".into(),
-                std::time::Instant::now(),
-            ));
+            self.set_status("Failed to create exports directory");
             return;
         }
         let ts = std::time::SystemTime::now()
@@ -873,16 +819,10 @@ impl App {
         let path = dir.join(format!("{}-{}.{}", prefix, ts, ext));
         match std::fs::write(&path, content) {
             Ok(_) => {
-                self.status_message = Some((
-                    format!("Exported to {}", path.display()),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Exported to {}", path.display()));
             }
             Err(e) => {
-                self.status_message = Some((
-                    format!("Export failed: {}", e),
-                    std::time::Instant::now(),
-                ));
+                self.set_status(format!("Export failed: {}", e));
             }
         }
     }
@@ -982,18 +922,11 @@ impl App {
                 match crate::rules::persist::load(&expanded) {
                     Ok(imported) => {
                         let count = imported.len();
-                        let mut rules = self.rules.write().unwrap();
-                        rules.extend(imported);
-                        self.status_message = Some((
-                            format!("Imported {} rules from {}", count, expanded.display()),
-                            std::time::Instant::now(),
-                        ));
+                        self.rules.write().unwrap().extend(imported);
+                        self.set_status(format!("Imported {} rules from {}", count, expanded.display()));
                     }
                     Err(e) => {
-                        self.status_message = Some((
-                            format!("Import failed: {}", e),
-                            std::time::Instant::now(),
-                        ));
+                        self.set_status(format!("Import failed: {}", e));
                     }
                 }
                 self.rules_ui.importing = false;
@@ -1071,16 +1004,10 @@ impl App {
                 let output = self.tools_output();
                 match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(output)) {
                     Ok(()) => {
-                        self.status_message = Some((
-                            "Copied to clipboard".to_string(),
-                            std::time::Instant::now(),
-                        ));
+                        self.set_status("Copied to clipboard");
                     }
                     Err(e) => {
-                        self.status_message = Some((
-                            format!("Clipboard error: {}", e),
-                            std::time::Instant::now(),
-                        ));
+                        self.set_status(format!("Clipboard error: {}", e));
                     }
                 }
             }
@@ -1252,17 +1179,7 @@ impl App {
             }
             EditorAction::Enter => {
                 match target {
-                    EditorTarget::Intercept => {
-                        if let Some(original) = self.intercept_ui.queue.pop_front() {
-                            let edited =
-                                codec::lines_to_request(&self.intercept_ui.editor.lines, &original);
-                            self.intercept_state
-                                .resolve(original.id, InterceptDecision::ForwardEdited(edited));
-                        }
-                        self.intercept_ui.editing = false;
-                        self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
-                        self.intercept_ui.scroll = 0;
-                    }
+                    EditorTarget::Intercept => self.forward_edited_intercept(),
                     EditorTarget::Repeater => {
                         self.repeater.editor.insert_newline();
                     }
@@ -1270,17 +1187,7 @@ impl App {
             }
             EditorAction::CtrlEnter => {
                 match target {
-                    EditorTarget::Intercept => {
-                        if let Some(original) = self.intercept_ui.queue.pop_front() {
-                            let edited =
-                                codec::lines_to_request(&self.intercept_ui.editor.lines, &original);
-                            self.intercept_state
-                                .resolve(original.id, InterceptDecision::ForwardEdited(edited));
-                        }
-                        self.intercept_ui.editing = false;
-                        self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
-                        self.intercept_ui.scroll = 0;
-                    }
+                    EditorTarget::Intercept => self.forward_edited_intercept(),
                     EditorTarget::Repeater => {
                         self.repeater.editing = false;
                         self.repeater_send();
@@ -1289,6 +1196,21 @@ impl App {
             }
             EditorAction::Custom(_) => {}
         }
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some((msg.into(), std::time::Instant::now()));
+    }
+
+    fn forward_edited_intercept(&mut self) {
+        if let Some(original) = self.intercept_ui.queue.pop_front() {
+            let edited = codec::lines_to_request(&self.intercept_ui.editor.lines, &original);
+            self.intercept_state
+                .resolve(original.id, InterceptDecision::ForwardEdited(edited));
+        }
+        self.intercept_ui.editing = false;
+        self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
+        self.intercept_ui.scroll = 0;
     }
 
     fn send_to_repeater(&mut self) {
@@ -1375,10 +1297,7 @@ impl App {
     fn macro_send_next(&mut self) {
         if self.macros.current_step >= self.macros.steps.len() {
             self.macros.running = false;
-            self.status_message = Some((
-                format!("Macro complete ({} steps)", self.macros.steps.len()),
-                std::time::Instant::now(),
-            ));
+            self.set_status(format!("Macro complete ({} steps)", self.macros.steps.len()));
             return;
         }
 
@@ -1456,10 +1375,7 @@ impl App {
                     self.macros.steps[step_idx].error = Some(err);
                     self.macros.steps[step_idx].state = StepState::Error;
                     self.macros.running = false;
-                    self.status_message = Some((
-                        format!("Macro stopped at step {} (error)", step_idx + 1),
-                        std::time::Instant::now(),
-                    ));
+                    self.set_status(format!("Macro stopped at step {} (error)", step_idx + 1));
                 }
             }
         }
@@ -1563,18 +1479,13 @@ impl App {
             }
 
         let total = self.store.len();
-        let complete = self
-            .store
-            .entries()
-            .iter()
-            .filter(|e| e.state == EntryState::Complete)
-            .count();
-        let errors = self
-            .store
-            .entries()
-            .iter()
-            .filter(|e| e.state == EntryState::Error)
-            .count();
+        let (complete, errors) = self.store.entries().iter().fold((0, 0), |(c, e), entry| {
+            match entry.state {
+                EntryState::Complete => (c + 1, e),
+                EntryState::Error => (c, e + 1),
+                _ => (c, e),
+            }
+        });
 
         let intercept_span = if !self.proxy_running {
             Span::styled(
@@ -1963,7 +1874,12 @@ fn url_encode(input: &str) -> String {
 
 
 fn hex_encode(input: &[u8]) -> String {
-    input.iter().map(|b| format!("{:02x}", b)).collect()
+    use std::fmt::Write;
+    let mut out = String::with_capacity(input.len() * 2);
+    for b in input {
+        let _ = write!(out, "{:02x}", b);
+    }
+    out
 }
 
 fn hex_decode(input: &str) -> Result<Vec<u8>, String> {

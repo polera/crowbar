@@ -37,9 +37,7 @@ impl CertificateAuthority {
         Ok(ca)
     }
 
-    fn generate() -> anyhow::Result<Self> {
-        let ca_key = KeyPair::generate()?;
-
+    fn ca_params() -> CertificateParams {
         let mut dn = DistinguishedName::new();
         dn.push(rcgen::DnType::CommonName, "Crowbar CA");
         dn.push(rcgen::DnType::OrganizationName, "Crowbar Proxy");
@@ -48,8 +46,12 @@ impl CertificateAuthority {
         params.distinguished_name = dn;
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params
+    }
 
-        let ca_cert = params.self_signed(&ca_key)?;
+    fn generate() -> anyhow::Result<Self> {
+        let ca_key = KeyPair::generate()?;
+        let ca_cert = Self::ca_params().self_signed(&ca_key)?;
         let ca_cert_pem = ca_cert.pem();
 
         Ok(Self {
@@ -62,18 +64,7 @@ impl CertificateAuthority {
     fn load_from_disk(cert_path: &Path, key_path: &Path) -> anyhow::Result<Self> {
         let key_pem = std::fs::read_to_string(key_path)?;
         let ca_key = KeyPair::from_pem(&key_pem)?;
-
-        // Reconstruct CA params with the same DN for signing
-        let mut dn = DistinguishedName::new();
-        dn.push(rcgen::DnType::CommonName, "Crowbar CA");
-        dn.push(rcgen::DnType::OrganizationName, "Crowbar Proxy");
-
-        let mut params = CertificateParams::default();
-        params.distinguished_name = dn;
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-
-        let ca_cert = params.self_signed(&ca_key)?;
+        let ca_cert = Self::ca_params().self_signed(&ca_key)?;
         let ca_cert_pem = std::fs::read_to_string(cert_path)?;
 
         Ok(Self {

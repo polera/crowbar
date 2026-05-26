@@ -18,7 +18,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(entries: &[HistoryEntry], macro_requests: Vec<RequestData>) -> Self {
+    pub fn new(entries: Vec<HistoryEntry>, macro_requests: Vec<RequestData>) -> Self {
         let macros = if macro_requests.is_empty() {
             None
         } else {
@@ -26,7 +26,7 @@ impl Session {
         };
         Self {
             version: 2,
-            entries: entries.to_vec(),
+            entries,
             macros,
         }
     }
@@ -41,7 +41,7 @@ pub fn sessions_dir() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-pub fn save(entries: &[HistoryEntry], macro_requests: Vec<RequestData>, name: &str) -> anyhow::Result<PathBuf> {
+pub fn save(entries: Vec<HistoryEntry>, macro_requests: Vec<RequestData>, name: &str) -> anyhow::Result<PathBuf> {
     let dir = sessions_dir()?;
     let path = dir.join(format!("{}.json", name));
     let session = Session::new(entries, macro_requests);

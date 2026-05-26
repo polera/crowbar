@@ -268,7 +268,7 @@ fn handle_command(cmd: crate::config::Command) -> anyhow::Result<()> {
                 .map(|m| m.steps)
                 .unwrap_or_default();
             let entry_count = session.entries.len();
-            let path = crate::http::session::save(&session.entries, macro_requests, &session_name)?;
+            let path = crate::http::session::save(session.entries, macro_requests, &session_name)?;
             eprintln!(
                 "Imported {} entries from {} -> {}",
                 entry_count,

@@ -48,10 +48,11 @@ pub fn body_lines<'a>(
 
 fn render_plain<'a>(text: &str, max_lines: usize) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
-    for line in text.lines().take(max_lines) {
+    let mut iter = text.lines();
+    for line in iter.by_ref().take(max_lines) {
         lines.push(Line::raw(line.to_string()));
     }
-    if text.lines().count() > max_lines {
+    if iter.next().is_some() {
         lines.push(Line::styled(
             "... truncated",
             Style::default().fg(Color::DarkGray),
@@ -67,10 +68,11 @@ fn render_json<'a>(text: &str, max_lines: usize) -> Vec<Line<'a>> {
     };
 
     let mut lines: Vec<Line<'a>> = Vec::new();
-    for line in pretty.lines().take(max_lines) {
+    let mut iter = pretty.lines();
+    for line in iter.by_ref().take(max_lines) {
         lines.push(colorize_json_line(line));
     }
-    if pretty.lines().count() > max_lines {
+    if iter.next().is_some() {
         lines.push(Line::styled(
             "... truncated",
             Style::default().fg(Color::DarkGray),
@@ -438,10 +440,11 @@ fn render_proto_fields<'a>(
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let end = s.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(s.len());
+        format!("{}...", &s[..end])
     }
 }
 

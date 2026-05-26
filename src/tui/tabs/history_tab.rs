@@ -130,8 +130,9 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
             } else {
                 &req.uri
             };
-            let path = if path.len() > 50 {
-                format!("{}...", &path[..47])
+            let path = if path.chars().count() > 50 {
+                let end = path.char_indices().nth(47).map(|(i, _)| i).unwrap_or(path.len());
+                format!("{}...", &path[..end])
             } else {
                 path.to_string()
             };
@@ -426,8 +427,8 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
     }
 }
 
-fn render_findings(_app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
-    let entry = match filtered.get(_app.history.selected) {
+fn render_findings(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+    let entry = match filtered.get(app.history.selected) {
         Some(e) => e,
         None => return,
     };
@@ -464,7 +465,7 @@ fn render_findings(_app: &App, filtered: &[&crate::http::models::HistoryEntry], 
                 .title(title),
         )
         .wrap(Wrap { trim: false })
-        .scroll((_app.history.scroll, 0));
+        .scroll((app.history.scroll, 0));
 
     frame.render_widget(widget, area);
 }
@@ -617,12 +618,4 @@ fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntr
     frame.render_widget(widget, area);
 }
 
-fn format_size(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{}B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
+use crate::tui::widgets::format_size;

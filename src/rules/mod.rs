@@ -122,36 +122,41 @@ fn apply_rule(
         return;
     }
 
+    let compiled = if rule.is_regex {
+        match Regex::new(&rule.match_pattern) {
+            Ok(re) => Some(re),
+            Err(_) => return,
+        }
+    } else {
+        None
+    };
+
     let scope = rule.scope;
 
     if let Some(uri) = uri
         && (scope == RuleScope::Url || scope == RuleScope::All) {
-            *uri = replace_in_str(uri, &rule.match_pattern, &rule.replacement, rule.is_regex);
+            *uri = replace_in_str(uri, &rule.match_pattern, &rule.replacement, compiled.as_ref());
         }
 
     if scope == RuleScope::Headers || scope == RuleScope::All {
         for (_key, value) in headers.iter_mut() {
-            *value = replace_in_str(value, &rule.match_pattern, &rule.replacement, rule.is_regex);
+            *value = replace_in_str(value, &rule.match_pattern, &rule.replacement, compiled.as_ref());
         }
     }
 
     if (scope == RuleScope::Body || scope == RuleScope::All)
         && let Ok(text) = std::str::from_utf8(body) {
-            let replaced = replace_in_str(text, &rule.match_pattern, &rule.replacement, rule.is_regex);
+            let replaced = replace_in_str(text, &rule.match_pattern, &rule.replacement, compiled.as_ref());
             if replaced != text {
                 *body = Bytes::from(replaced);
             }
         }
 }
 
-fn replace_in_str(input: &str, pattern: &str, replacement: &str, is_regex: bool) -> String {
-    if is_regex {
-        match Regex::new(pattern) {
-            Ok(re) => re.replace_all(input, replacement).to_string(),
-            Err(_) => input.to_string(),
-        }
-    } else {
-        input.replace(pattern, replacement)
+fn replace_in_str(input: &str, pattern: &str, replacement: &str, compiled: Option<&Regex>) -> String {
+    match compiled {
+        Some(re) => re.replace_all(input, replacement).to_string(),
+        None => input.replace(pattern, replacement),
     }
 }
 

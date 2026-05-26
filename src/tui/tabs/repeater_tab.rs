@@ -558,22 +558,4 @@ fn render_macro_actions(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(widget, area);
 }
 
-fn key_style() -> Style {
-    Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD)
-}
-
-fn dim_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-fn format_size(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{}B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
+use crate::tui::widgets::{format_size, key_style, dim_style};

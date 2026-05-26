@@ -1,9 +1,8 @@
 use std::time::Instant;
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder as ClientBuilder;
-use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -17,23 +16,12 @@ pub async fn send_request(
     request: RequestData,
     ui_tx: mpsc::UnboundedSender<ProxyToUi>,
 ) {
-    let start = Instant::now();
-
-    let result = if request.is_grpc {
-        send_h2(&request).await
-    } else if request.is_tls {
-        send_https(&request).await
-    } else {
-        send_http(&request).await
-    };
-
-    match result {
-        Ok(mut resp) => {
-            resp.duration = start.elapsed();
+    match send_raw_request(request).await {
+        Ok(resp) => {
             let _ = ui_tx.send(ProxyToUi::RepeaterResponse(resp));
         }
         Err(e) => {
-            let _ = ui_tx.send(ProxyToUi::RepeaterError(e.to_string()));
+            let _ = ui_tx.send(ProxyToUi::RepeaterError(e));
         }
     }
 }
@@ -59,52 +47,26 @@ pub async fn send_raw_request(request: RequestData) -> Result<ResponseData, Stri
 async fn send_http(request: &RequestData) -> anyhow::Result<ResponseData> {
     let host = strip_port(&request.host);
     let port = extract_port(&request.uri).unwrap_or(80);
-    let addr = format!("{}:{}", host, port);
 
-    let tcp = TcpStream::connect(&addr).await?;
-    let io = TokioIo::new(tcp);
-
-    let (mut sender, conn) = ClientBuilder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .handshake(io)
-        .await?;
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            debug!("Repeater HTTP connection ended: {}", e);
-        }
-    });
-
-    let path = crate::http::extract_path(&request.uri);
-
-    let mut req = Request::builder()
-        .method(request.method.as_str())
-        .uri(path);
-
-    for (key, value) in &request.headers {
-        req = req.header(key.as_str(), value.as_str());
-    }
-
-    let req = req.body(Full::new(request.body.clone()))?;
-    let resp = sender.send_request(req).await?;
-
-    parse_response(resp).await
+    let tcp = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    send_h1_via(TokioIo::new(tcp), request).await
 }
 
 async fn send_https(request: &RequestData) -> anyhow::Result<ResponseData> {
     let host = strip_port(&request.host);
     let port = extract_port(&request.uri).unwrap_or(443);
-    let addr = format!("{}:{}", host, port);
 
-    let client_config = crate::tls::build_tls_client_config();
-
-    let tcp = TcpStream::connect(&addr).await?;
+    let tcp = TcpStream::connect(format!("{}:{}", host, port)).await?;
     let server_name = crate::tls::server_name_or_localhost(host);
-    let connector = TlsConnector::from(client_config);
+    let connector = TlsConnector::from(crate::tls::build_tls_client_config());
     let tls_stream = connector.connect(server_name, tcp).await?;
+    send_h1_via(TokioIo::new(tls_stream), request).await
+}
 
-    let io = TokioIo::new(tls_stream);
+async fn send_h1_via<IO>(io: TokioIo<IO>, request: &RequestData) -> anyhow::Result<ResponseData>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let (mut sender, conn) = ClientBuilder::new()
         .preserve_header_case(true)
         .title_case_headers(true)
@@ -113,23 +75,15 @@ async fn send_https(request: &RequestData) -> anyhow::Result<ResponseData> {
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            debug!("Repeater HTTPS connection ended: {}", e);
+            debug!("Repeater connection ended: {}", e);
         }
     });
 
     let path = crate::http::extract_path(&request.uri);
-
-    let mut req = Request::builder()
-        .method(request.method.as_str())
-        .uri(path);
-
-    for (key, value) in &request.headers {
-        req = req.header(key.as_str(), value.as_str());
-    }
-
-    let req = req.body(Full::new(request.body.clone()))?;
+    let req = crate::proxy::build_forwarding_request(
+        &request.method, path, &request.headers, request.body.clone(),
+    );
     let resp = sender.send_request(req).await?;
-
     parse_response(resp).await
 }
 
@@ -164,15 +118,9 @@ async fn send_h2(request: &RequestData) -> anyhow::Result<ResponseData> {
         format!("https://{}:{}{}", host, port, path)
     };
 
-    let mut req = Request::builder()
-        .method(request.method.as_str())
-        .uri(&upstream_uri);
-
-    for (key, value) in &request.headers {
-        req = req.header(key.as_str(), value.as_str());
-    }
-
-    let req = req.body(Full::new(request.body.clone()))?;
+    let req = crate::proxy::build_forwarding_request(
+        &request.method, &upstream_uri, &request.headers, request.body.clone(),
+    );
     let resp = sender.send_request(req).await?;
 
     parse_h2_response(resp).await
@@ -189,7 +137,7 @@ async fn parse_response(
 
     Ok(ResponseData {
         status,
-        reason: crate::http::models::status_reason(status),
+        reason: crate::http::models::status_reason(status).to_string(),
         version,
         headers,
         body,
@@ -224,7 +172,7 @@ async fn parse_h2_response(
 
     Ok(ResponseData {
         status,
-        reason: crate::http::models::status_reason(status),
+        reason: crate::http::models::status_reason(status).to_string(),
         version: HttpVersion::Http2,
         headers,
         body: resp_body,

@@ -240,12 +240,4 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(widget, area);
 }
 
-fn key_style() -> Style {
-    Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD)
-}
-
-fn dim_key_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
+use crate::tui::widgets::{key_style, dim_style as dim_key_style};

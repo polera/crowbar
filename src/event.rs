@@ -18,7 +18,7 @@ pub struct EventLoop {
 }
 
 impl EventLoop {
-    pub fn new(proxy_rx: mpsc::UnboundedReceiver<ProxyToUi>) -> Self {
+    pub fn new(mut proxy_rx: mpsc::UnboundedReceiver<ProxyToUi>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let input_tx = tx.clone();
@@ -33,7 +33,6 @@ impl EventLoop {
 
         let proxy_tx = tx.clone();
         tokio::spawn(async move {
-            let mut proxy_rx = proxy_rx;
             while let Some(msg) = proxy_rx.recv().await {
                 if proxy_tx.send(AppEvent::Proxy(msg)).is_err() {
                     break;

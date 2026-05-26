@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
 use crate::channel::ProxyToUi;
-use crate::http::models::{RequestData, RequestId, ResponseData};
+use crate::http::models::{RequestData, RequestId};
 use crate::proxy::intercept::InterceptDecision;
 use crate::proxy::tunnel;
 use crate::proxy::ProxyContext;
@@ -191,21 +191,13 @@ impl ProxyHandler {
             .map(|pq| pq.as_str())
             .unwrap_or("/");
 
-        let fwd_headers = &request_data.headers;
-        let fwd_body = request_data.body.clone();
-
-        let mut upstream_req = Request::builder()
-            .method(parts.method)
-            .uri(path_and_query)
-            .version(parts.version);
-
-        for (key, value) in fwd_headers {
-            upstream_req = upstream_req.header(key.as_str(), value.as_str());
-        }
-
-        let upstream_req = upstream_req
-            .body(Full::new(fwd_body))
-            .expect("building upstream request");
+        let mut upstream_req = crate::proxy::build_forwarding_request(
+            parts.method.as_str(),
+            path_and_query,
+            &request_data.headers,
+            request_data.body.clone(),
+        );
+        *upstream_req.version_mut() = parts.version;
 
         let upstream_resp = match sender.send_request(upstream_req).await {
             Ok(resp) => resp,
@@ -225,36 +217,14 @@ impl ProxyHandler {
             }
         };
 
-        let resp_status = upstream_resp.status().as_u16();
-        let resp_version = upstream_resp.version().into();
-        let mut resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
-
-        let mut resp_body = upstream_resp.collect().await?.to_bytes();
-        let duration = start.elapsed();
-
-        rules::apply_response_rules(&self.ctx.rules, &mut resp_headers, &mut resp_body);
-
-        let response_data = ResponseData {
-            status: resp_status,
-            reason: crate::http::models::status_reason(resp_status),
-            version: resp_version,
-            headers: resp_headers.clone(),
-            body: resp_body.clone(),
-            trailers: Vec::new(),
-            duration,
-        };
-
-        if in_scope {
-            let _ = self
-                .ctx.ui_tx
-                .send(ProxyToUi::ResponseReceived(request_id, response_data));
-        }
-
-        let mut response = Response::builder().status(resp_status);
-        for (key, value) in &resp_headers {
-            response = response.header(key.as_str(), value.as_str());
-        }
-
-        Ok(response.body(Full::new(resp_body)).unwrap())
+        Ok(crate::proxy::process_h1_response(
+            upstream_resp,
+            request_id,
+            start,
+            in_scope,
+            &self.ctx.rules,
+            &self.ctx.ui_tx,
+        )
+        .await)
     }
 }

@@ -42,12 +42,11 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
 }
 
-fn get_headers<'a>(headers: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+fn get_headers<'a>(headers: &'a [(String, String)], name: &'a str) -> impl Iterator<Item = &'a str> {
     headers
         .iter()
-        .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+        .filter(move |(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_str())
-        .collect()
 }
 
 fn check_security_headers(

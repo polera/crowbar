@@ -14,11 +14,11 @@ pub fn load_file(path: &Path) -> anyhow::Result<super::session::Session> {
         .to_lowercase();
 
     match ext.as_str() {
-        "har" => load_har(path).map(|entries| super::session::Session::new(&entries, Vec::new())),
+        "har" => load_har(path).map(|entries| super::session::Session::new(entries, Vec::new())),
         "json" => {
             match super::session::load(path) {
                 Ok(session) => Ok(session),
-                Err(_) => load_har(path).map(|entries| super::session::Session::new(&entries, Vec::new())),
+                Err(_) => load_har(path).map(|entries| super::session::Session::new(entries, Vec::new())),
             }
         }
         _ => super::session::load(path),

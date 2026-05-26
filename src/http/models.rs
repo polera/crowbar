@@ -55,11 +55,11 @@ pub fn extract_headers(headers: &hyper::HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-pub fn status_reason(code: u16) -> String {
+pub fn status_reason(code: u16) -> &'static str {
     http::StatusCode::from_u16(code)
-        .map(|s| s.canonical_reason().unwrap_or(""))
+        .ok()
+        .and_then(|s| s.canonical_reason())
         .unwrap_or("")
-        .to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,14 +144,17 @@ pub enum EntryState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WsDirection {
+pub enum MessageDirection {
     ClientToServer,
     ServerToClient,
 }
 
+pub type WsDirection = MessageDirection;
+pub type GrpcDirection = MessageDirection;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WsMessage {
-    pub direction: WsDirection,
+    pub direction: MessageDirection,
     pub opcode: u8,
     #[serde(with = "bytes_base64")]
     pub payload: Bytes,
@@ -180,15 +183,9 @@ impl WsMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GrpcDirection {
-    ClientToServer,
-    ServerToClient,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpcMessage {
-    pub direction: GrpcDirection,
+    pub direction: MessageDirection,
     pub compressed: bool,
     #[serde(with = "bytes_base64")]
     pub payload: Bytes,

@@ -21,11 +21,11 @@ impl std::fmt::Display for ProtoValue {
             ProtoValue::Fixed64(v) => write!(f, "{}", v),
             ProtoValue::Fixed32(v) => write!(f, "{}", v),
             ProtoValue::String(s) => {
-                let truncated: String = s.chars().take(40).collect();
-                if s.len() > 40 {
+                if s.chars().count() > 40 {
+                    let truncated: String = s.chars().take(40).collect();
                     write!(f, "\"{}...\"", truncated)
                 } else {
-                    write!(f, "\"{}\"", truncated)
+                    write!(f, "\"{}\"", s)
                 }
             }
             ProtoValue::Bytes(b) => write!(f, "[{} bytes]", b.len()),
@@ -338,39 +338,36 @@ pub fn encode_raw(fields: &[ProtoField]) -> Vec<u8> {
 }
 
 fn encode_field(buf: &mut Vec<u8>, field: &ProtoField) {
-    let (wire_type, data) = match &field.value {
+    match &field.value {
         ProtoValue::Varint(v) => {
-            let mut vbuf = Vec::new();
-            encode_varint(&mut vbuf, *v);
-            (0u32, vbuf)
+            encode_varint(buf, (field.number << 3) as u64);
+            encode_varint(buf, *v);
         }
-        ProtoValue::Fixed64(v) => (1, v.to_le_bytes().to_vec()),
-        ProtoValue::Fixed32(v) => (5, v.to_le_bytes().to_vec()),
+        ProtoValue::Fixed64(v) => {
+            encode_varint(buf, ((field.number << 3) | 1) as u64);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        ProtoValue::Fixed32(v) => {
+            encode_varint(buf, ((field.number << 3) | 5) as u64);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
         ProtoValue::String(s) => {
-            let b = s.as_bytes();
-            let mut ld = Vec::new();
-            encode_varint(&mut ld, b.len() as u64);
-            ld.extend_from_slice(b);
-            (2, ld)
+            encode_varint(buf, ((field.number << 3) | 2) as u64);
+            encode_varint(buf, s.len() as u64);
+            buf.extend_from_slice(s.as_bytes());
         }
         ProtoValue::Bytes(b) => {
-            let mut ld = Vec::new();
-            encode_varint(&mut ld, b.len() as u64);
-            ld.extend_from_slice(b);
-            (2, ld)
+            encode_varint(buf, ((field.number << 3) | 2) as u64);
+            encode_varint(buf, b.len() as u64);
+            buf.extend_from_slice(b);
         }
         ProtoValue::Message(sub_fields) => {
             let inner = encode_raw(sub_fields);
-            let mut ld = Vec::new();
-            encode_varint(&mut ld, inner.len() as u64);
-            ld.extend(inner);
-            (2, ld)
+            encode_varint(buf, ((field.number << 3) | 2) as u64);
+            encode_varint(buf, inner.len() as u64);
+            buf.extend(inner);
         }
-    };
-
-    let tag = (field.number << 3) | wire_type;
-    encode_varint(buf, tag as u64);
-    buf.extend(data);
+    }
 }
 
 fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {

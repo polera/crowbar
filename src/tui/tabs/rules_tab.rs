@@ -230,9 +230,9 @@ fn field_value(app: &App, field: RuleField, current: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max - 3])
-    } else {
-        s.to_string()
+    if s.chars().count() <= max {
+        return s.to_string();
     }
+    let end = s.char_indices().nth(max - 3).map(|(i, _)| i).unwrap_or(s.len());
+    format!("{}...", &s[..end])
 }

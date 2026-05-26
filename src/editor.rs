@@ -140,31 +140,30 @@ impl TextEditor {
             );
 
             if editing && i == self.cursor_line {
-                let col = self.cursor_col.min(line.len());
-                let before = &line[..col];
-                let cursor_char = if col < line.len() {
-                    &line[col..col + 1]
+                let char_count = line.chars().count();
+                let col = self.cursor_col.min(char_count);
+                let mut indices = line.char_indices();
+                let col_byte = indices.nth(col).map(|(i, _)| i).unwrap_or(line.len());
+                let before = &line[..col_byte];
+                let (cursor_char, after) = if col < char_count {
+                    let next_byte = line[col_byte..].chars().next().map(|c| col_byte + c.len_utf8()).unwrap_or(line.len());
+                    (&line[col_byte..next_byte], &line[next_byte..])
                 } else {
-                    " "
-                };
-                let after = if col + 1 < line.len() {
-                    &line[col + 1..]
-                } else {
-                    ""
+                    (" ", "")
                 };
                 result.push(Line::from(vec![
                     num_span,
-                    Span::raw(before.to_string()),
+                    Span::raw(before),
                     Span::styled(
-                        cursor_char.to_string(),
+                        cursor_char,
                         Style::default().bg(Color::White).fg(Color::Black),
                     ),
-                    Span::raw(after.to_string()),
+                    Span::raw(after),
                 ]));
             } else {
                 result.push(Line::from(vec![
                     num_span,
-                    Span::raw(line.clone()),
+                    Span::raw(line.as_str()),
                 ]));
             }
         }
