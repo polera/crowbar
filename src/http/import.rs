@@ -149,28 +149,9 @@ fn parse_iso_timestamp(s: &str) -> Option<SystemTime> {
     let min: u64 = time_iter.next()?.parse().ok()?;
     let sec: u64 = time_iter.next()?.parse().ok()?;
 
-    let mut days: u64 = 0;
-    for y in 1970..year {
-        days += if is_leap(y) { 366 } else { 365 };
-    }
-
-    let months = if is_leap(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    for m in months.iter().take((month as usize).saturating_sub(1)) {
-        days += m;
-    }
-    days += day.saturating_sub(1);
-
+    let days = super::date_to_days(year, month, day);
     let total_secs = days * 86400 + hour * 3600 + min * 60 + sec;
     Some(UNIX_EPOCH + Duration::from_secs(total_secs))
-}
-
-fn is_leap(y: u64) -> bool {
-    super::is_leap(y)
 }
 
 #[derive(Deserialize)]

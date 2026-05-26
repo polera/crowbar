@@ -154,7 +154,7 @@ async fn handle_websocket_upgrade(
                 request_id,
                 format!("Connection failed: {}", e),
             ));
-            return Ok(bad_gateway(&format!("Connection failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!("Connection failed: {}", e)));
         }
     };
 
@@ -168,7 +168,7 @@ async fn handle_websocket_upgrade(
                 request_id,
                 format!("TLS handshake failed: {}", e),
             ));
-            return Ok(bad_gateway(&format!("TLS handshake failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!("TLS handshake failed: {}", e)));
         }
     };
 
@@ -182,7 +182,7 @@ async fn handle_websocket_upgrade(
         Ok(pair) => pair,
         Err(e) => {
             warn!("WebSocket: upstream handshake failed: {}", e);
-            return Ok(bad_gateway(&format!("HTTP handshake failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!("HTTP handshake failed: {}", e)));
         }
     };
 
@@ -217,7 +217,7 @@ async fn handle_websocket_upgrade(
         Ok(resp) => resp,
         Err(e) => {
             warn!("WebSocket: upstream request failed: {}", e);
-            return Ok(bad_gateway(&format!("Request failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!("Request failed: {}", e)));
         }
     };
 
@@ -313,7 +313,7 @@ async fn handle_http_request(
         Ok(b) => b.to_bytes(),
         Err(e) => {
             warn!("Failed to read request body: {}", e);
-            return Ok(bad_gateway(&format!("Failed to read request body: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!("Failed to read request body: {}", e)));
         }
     };
 
@@ -378,7 +378,7 @@ async fn handle_http_request(
                 request_id,
                 format!("Connection failed: {}", e),
             ));
-            return Ok(bad_gateway(&format!("Connection failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!("Connection failed: {}", e)));
         }
     };
 
@@ -392,76 +392,27 @@ async fn handle_http_request(
                 request_id,
                 format!("TLS handshake failed: {}", e),
             ));
-            return Ok(bad_gateway(&format!("TLS handshake failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!("TLS handshake failed: {}", e)));
         }
     };
 
     let io = TokioIo::new(tls_stream);
-    let (mut sender, conn) = match ClientBuilder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .handshake(io)
-        .await
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!("Upstream HTTP handshake failed: {}", e);
-            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
-                request_id,
-                format!("HTTP handshake failed: {}", e),
-            ));
-            return Ok(bad_gateway(&format!("HTTP handshake failed: {}", e)));
-        }
-    };
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            debug!("Upstream connection ended: {}", e);
-        }
-    });
-
     let path_and_query = parts
         .uri
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
 
-    let mut upstream_req = crate::proxy::build_forwarding_request(
-        parts.method.as_str(),
+    Ok(crate::proxy::forward_h1(
+        io,
+        parts.version,
         path_and_query,
-        &request_data.headers,
-        request_data.body.clone(),
-    );
-    *upstream_req.version_mut() = parts.version;
-
-    let upstream_resp = match sender.send_request(upstream_req).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            warn!("Upstream request to {} failed: {}", addr, e);
-            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
-                request_id,
-                format!("Request failed: {}", e),
-            ));
-            return Ok(bad_gateway(&format!("Request failed: {}", e)));
-        }
-    };
-
-    Ok(crate::proxy::process_h1_response(
-        upstream_resp,
-        request_id,
+        &request_data,
         start,
         in_scope,
-        &ctx.rules,
-        &ctx.ui_tx,
+        ctx,
     )
     .await)
-}
-
-fn bad_gateway(msg: &str) -> hyper::Response<Full<Bytes>> {
-    hyper::Response::builder()
-        .status(502)
-        .body(Full::new(Bytes::from(msg.to_string())))
-        .unwrap()
 }
 
 fn h2_bad_gateway(msg: &str) -> hyper::Response<H2RespBody> {
@@ -541,12 +492,7 @@ impl http_body::Body for GrpcTeeBody {
                         );
                     }
                     if let Some(trailers) = frame.trailers_ref() {
-                        let pairs: Vec<(String, String)> = trailers
-                            .iter()
-                            .map(|(k, v)| {
-                                (k.to_string(), v.to_str().unwrap_or("<binary>").to_string())
-                            })
-                            .collect();
+                        let pairs = crate::http::models::extract_trailers(Some(trailers));
                         let _ = this.ui_tx.send(ProxyToUi::GrpcTrailers(this.request_id, pairs));
                     }
                 }
@@ -854,14 +800,7 @@ async fn handle_h2_request(
     let mut resp_body = collected.to_bytes();
     let duration = start.elapsed();
 
-    let trailer_pairs: Vec<(String, String)> = resp_trailers
-        .as_ref()
-        .map(|t| {
-            t.iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let trailer_pairs = crate::http::models::extract_trailers(resp_trailers.as_ref());
 
     let mut resp_headers_mut = resp_headers;
     rules::apply_response_rules(&ctx.rules, &mut resp_headers_mut, &mut resp_body);

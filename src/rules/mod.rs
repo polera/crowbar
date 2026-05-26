@@ -1,9 +1,16 @@
 pub mod persist;
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use bytes::Bytes;
 use regex::Regex;
+
+fn compile_regex(pattern: &str) -> Option<Regex> {
+    if pattern.is_empty() {
+        return None;
+    }
+    Regex::new(pattern).ok()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuleTarget {
@@ -67,6 +74,8 @@ pub struct Rule {
     pub match_pattern: String,
     pub replacement: String,
     pub is_regex: bool,
+    #[serde(skip)]
+    compiled_regex: OnceLock<Option<Regex>>,
 }
 
 impl Rule {
@@ -79,7 +88,24 @@ impl Rule {
             match_pattern: String::new(),
             replacement: String::new(),
             is_regex: false,
+            compiled_regex: OnceLock::new(),
         }
+    }
+
+    pub fn invalidate_regex(&mut self) {
+        self.compiled_regex = OnceLock::new();
+    }
+
+    fn get_compiled_regex(&self) -> Option<&Regex> {
+        self.compiled_regex
+            .get_or_init(|| {
+                if self.is_regex {
+                    compile_regex(&self.match_pattern)
+                } else {
+                    None
+                }
+            })
+            .as_ref()
     }
 }
 
@@ -122,31 +148,27 @@ fn apply_rule(
         return;
     }
 
-    let compiled = if rule.is_regex {
-        match Regex::new(&rule.match_pattern) {
-            Ok(re) => Some(re),
-            Err(_) => return,
-        }
-    } else {
-        None
-    };
+    if rule.is_regex && rule.get_compiled_regex().is_none() {
+        return;
+    }
 
+    let compiled = rule.get_compiled_regex();
     let scope = rule.scope;
 
     if let Some(uri) = uri
         && (scope == RuleScope::Url || scope == RuleScope::All) {
-            *uri = replace_in_str(uri, &rule.match_pattern, &rule.replacement, compiled.as_ref());
+            *uri = replace_in_str(uri, &rule.match_pattern, &rule.replacement, compiled);
         }
 
     if scope == RuleScope::Headers || scope == RuleScope::All {
         for (_key, value) in headers.iter_mut() {
-            *value = replace_in_str(value, &rule.match_pattern, &rule.replacement, compiled.as_ref());
+            *value = replace_in_str(value, &rule.match_pattern, &rule.replacement, compiled);
         }
     }
 
     if (scope == RuleScope::Body || scope == RuleScope::All)
         && let Ok(text) = std::str::from_utf8(body) {
-            let replaced = replace_in_str(text, &rule.match_pattern, &rule.replacement, compiled.as_ref());
+            let replaced = replace_in_str(text, &rule.match_pattern, &rule.replacement, compiled);
             if replaced != text {
                 *body = Bytes::from(replaced);
             }
@@ -178,6 +200,7 @@ mod tests {
             match_pattern: "secret".into(),
             replacement: "REDACTED".into(),
             is_regex: false,
+            compiled_regex: OnceLock::new(),
         }]);
 
         let mut uri = "https://example.com".to_string();
@@ -199,6 +222,7 @@ mod tests {
             match_pattern: r"token=\w+".into(),
             replacement: "token=MASKED".into(),
             is_regex: true,
+            compiled_regex: OnceLock::new(),
         }]);
 
         let mut uri = "https://example.com/api?token=abc123&other=1".to_string();
@@ -219,6 +243,7 @@ mod tests {
             match_pattern: "Apache/2.4".into(),
             replacement: "Hidden".into(),
             is_regex: false,
+            compiled_regex: OnceLock::new(),
         }]);
 
         let mut headers = vec![
@@ -242,6 +267,7 @@ mod tests {
             match_pattern: "secret".into(),
             replacement: "REDACTED".into(),
             is_regex: false,
+            compiled_regex: OnceLock::new(),
         }]);
 
         let mut uri = "https://secret.com".to_string();
@@ -263,6 +289,7 @@ mod tests {
             match_pattern: "secret".into(),
             replacement: "REDACTED".into(),
             is_regex: false,
+            compiled_regex: OnceLock::new(),
         }]);
 
         let mut uri = "https://secret.com".to_string();

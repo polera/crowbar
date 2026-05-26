@@ -866,6 +866,7 @@ impl App {
                 if count > 0 => {
                     let mut rules = self.rules.write().unwrap();
                     rules[self.rules_ui.selected].is_regex = !rules[self.rules_ui.selected].is_regex;
+                    rules[self.rules_ui.selected].invalidate_regex();
                 }
             KeyCode::Char('n')
                 if count > 0 => {
@@ -958,6 +959,7 @@ impl App {
                             }
                             RuleField::Pattern => {
                                 rules[self.rules_ui.selected].match_pattern = self.rules_ui.edit_buffer.clone();
+                                rules[self.rules_ui.selected].invalidate_regex();
                             }
                             RuleField::Replacement => {
                                 rules[self.rules_ui.selected].replacement = self.rules_ui.edit_buffer.clone();

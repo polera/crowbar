@@ -55,6 +55,16 @@ pub fn extract_headers(headers: &hyper::HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
+pub fn extract_trailers(trailers: Option<&hyper::HeaderMap>) -> Vec<(String, String)> {
+    trailers
+        .map(|t| {
+            t.iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn status_reason(code: u16) -> &'static str {
     http::StatusCode::from_u16(code)
         .ok()
@@ -222,7 +232,7 @@ impl HistoryEntry {
             && resp.status.to_string().contains(filter) {
                 return true;
             }
-        if self.request.is_grpc && "grpc".contains(filter) {
+        if self.request.is_grpc && "grpc".starts_with(filter) {
             return true;
         }
         false

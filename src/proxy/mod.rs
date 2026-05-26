@@ -14,6 +14,10 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response};
 use tokio::sync::mpsc;
 
+use hyper::client::conn::http1::Builder as ClientBuilder;
+use hyper_util::rt::TokioIo;
+use tracing::debug;
+
 use crate::channel::ProxyToUi;
 use crate::http::models::{RequestId, ResponseData};
 use crate::proxy::intercept::InterceptState;
@@ -93,4 +97,77 @@ pub(crate) async fn process_h1_response(
     }
 
     build_client_response(resp_status, &resp_headers, resp_body)
+}
+
+pub(crate) fn bad_gateway(msg: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(502)
+        .body(Full::new(Bytes::from(msg.to_string())))
+        .unwrap()
+}
+
+pub(crate) async fn forward_h1<IO>(
+    io: TokioIo<IO>,
+    version: hyper::Version,
+    path_and_query: &str,
+    request_data: &crate::http::models::RequestData,
+    start: Instant,
+    in_scope: bool,
+    ctx: &ProxyContext,
+) -> Response<Full<Bytes>>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let request_id = request_data.id;
+
+    let (mut sender, conn) = match ClientBuilder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .handshake(io)
+        .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
+                request_id,
+                format!("HTTP handshake failed: {}", e),
+            ));
+            return bad_gateway(&format!("HTTP handshake failed: {}", e));
+        }
+    };
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            debug!("Upstream connection ended: {}", e);
+        }
+    });
+
+    let mut upstream_req = build_forwarding_request(
+        &request_data.method,
+        path_and_query,
+        &request_data.headers,
+        request_data.body.clone(),
+    );
+    *upstream_req.version_mut() = version;
+
+    let upstream_resp = match sender.send_request(upstream_req).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
+                request_id,
+                format!("Request failed: {}", e),
+            ));
+            return bad_gateway(&format!("Upstream request failed: {}", e));
+        }
+    };
+
+    process_h1_response(
+        upstream_resp,
+        request_id,
+        start,
+        in_scope,
+        &ctx.rules,
+        &ctx.ui_tx,
+    )
+    .await
 }

@@ -110,8 +110,9 @@ impl TextEditor {
     pub fn insert_newline(&mut self) {
         self.save_undo();
         let col = self.cursor_col.min(self.current_line_len());
-        let rest = self.lines[self.cursor_line][col..].to_string();
-        self.lines[self.cursor_line].truncate(col);
+        let byte_col = self.char_to_byte(col);
+        let rest = self.lines[self.cursor_line][byte_col..].to_string();
+        self.lines[self.cursor_line].truncate(byte_col);
         self.cursor_line += 1;
         self.lines.insert(self.cursor_line, rest);
         self.cursor_col = 0;
@@ -199,7 +200,8 @@ impl TextEditor {
             (_, KeyCode::Char(c)) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.save_undo();
                 let col = self.cursor_col.min(self.current_line_len());
-                self.lines[self.cursor_line].insert(col, c);
+                let byte_col = self.char_to_byte(col);
+                self.lines[self.cursor_line].insert(byte_col, c);
                 self.cursor_col = col + 1;
                 EditorAction::Consumed
             }
@@ -292,7 +294,7 @@ impl TextEditor {
             }
             (_, KeyCode::Char('^')) => {
                 let line = &self.lines[self.cursor_line];
-                self.cursor_col = line.len() - line.trim_start().len();
+                self.cursor_col = line.chars().take_while(|c| c.is_whitespace()).count();
                 EditorAction::Consumed
             }
 
@@ -355,7 +357,13 @@ impl TextEditor {
                 self.save_undo();
                 let len = self.current_line_len();
                 if len > 0 && self.cursor_col < len {
-                    self.lines[self.cursor_line].remove(self.cursor_col);
+                    let byte_col = self.char_to_byte(self.cursor_col);
+                    let next_byte = self.lines[self.cursor_line][byte_col..]
+                        .chars()
+                        .next()
+                        .map(|c| byte_col + c.len_utf8())
+                        .unwrap_or(byte_col);
+                    self.lines[self.cursor_line].drain(byte_col..next_byte);
                     self.clamp_cursor_normal();
                 }
                 EditorAction::Consumed
@@ -363,7 +371,8 @@ impl TextEditor {
             (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
                 self.save_undo();
                 let col = self.cursor_col.min(self.current_line_len());
-                self.lines[self.cursor_line].truncate(col);
+                let byte_col = self.char_to_byte(col);
+                self.lines[self.cursor_line].truncate(byte_col);
                 self.clamp_cursor_normal();
                 EditorAction::Consumed
             }
@@ -425,7 +434,8 @@ impl TextEditor {
             ('d', KeyCode::Char('$')) => {
                 self.save_undo();
                 let col = self.cursor_col.min(self.current_line_len());
-                self.lines[self.cursor_line].truncate(col);
+                let byte_col = self.char_to_byte(col);
+                self.lines[self.cursor_line].truncate(byte_col);
                 self.clamp_cursor_normal();
                 EditorAction::Consumed
             }
@@ -446,12 +456,18 @@ impl TextEditor {
         if self.cursor_col > 0 && self.cursor_line < self.lines.len() {
             self.save_undo();
             self.cursor_col -= 1;
-            self.lines[self.cursor_line].remove(self.cursor_col);
+            let byte_col = self.char_to_byte(self.cursor_col);
+            let next_byte = self.lines[self.cursor_line][byte_col..]
+                .chars()
+                .next()
+                .map(|c| byte_col + c.len_utf8())
+                .unwrap_or(byte_col);
+            self.lines[self.cursor_line].drain(byte_col..next_byte);
         } else if self.cursor_col == 0 && self.cursor_line > 0 {
             self.save_undo();
             let current = self.lines.remove(self.cursor_line);
             self.cursor_line -= 1;
-            self.cursor_col = self.lines[self.cursor_line].len();
+            self.cursor_col = self.current_line_len();
             self.lines[self.cursor_line].push_str(&current);
         }
     }
@@ -463,7 +479,13 @@ impl TextEditor {
         let line_len = self.current_line_len();
         if self.cursor_col < line_len {
             self.save_undo();
-            self.lines[self.cursor_line].remove(self.cursor_col);
+            let byte_col = self.char_to_byte(self.cursor_col);
+            let next_byte = self.lines[self.cursor_line][byte_col..]
+                .chars()
+                .next()
+                .map(|c| byte_col + c.len_utf8())
+                .unwrap_or(byte_col);
+            self.lines[self.cursor_line].drain(byte_col..next_byte);
         } else if self.cursor_line + 1 < self.lines.len() {
             self.save_undo();
             let next = self.lines.remove(self.cursor_line + 1);
@@ -506,7 +528,15 @@ impl TextEditor {
     }
 
     fn current_line_len(&self) -> usize {
-        self.lines[self.cursor_line].len()
+        self.lines[self.cursor_line].chars().count()
+    }
+
+    fn char_to_byte(&self, char_col: usize) -> usize {
+        self.lines[self.cursor_line]
+            .char_indices()
+            .nth(char_col)
+            .map(|(i, _)| i)
+            .unwrap_or(self.lines[self.cursor_line].len())
     }
 
     fn clamp_cursor_normal(&mut self) {
@@ -556,8 +586,8 @@ impl TextEditor {
         if col == 0 {
             if self.cursor_line > 0 {
                 self.cursor_line -= 1;
-                col = self.lines[self.cursor_line].len();
                 let prev_line: Vec<char> = self.lines[self.cursor_line].chars().collect();
+                col = prev_line.len();
                 while col > 0 && prev_line[col - 1].is_whitespace() {
                     col -= 1;
                 }
@@ -627,8 +657,9 @@ impl TextEditor {
         }
 
         if end > start {
-            let line_str = &mut self.lines[self.cursor_line];
-            line_str.drain(start..end);
+            let byte_start = self.char_to_byte(start);
+            let byte_end = self.char_to_byte(end);
+            self.lines[self.cursor_line].drain(byte_start..byte_end);
         }
     }
 

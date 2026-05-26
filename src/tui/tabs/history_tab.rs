@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::http::models::EntryState;
-use crate::tui::widgets::{body_view, logo};
+use crate::tui::widgets::{body_view, format_size, logo};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let filtered = app.store.filtered_entries_all();
@@ -265,13 +265,7 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
     ]));
     req_lines.push(Line::raw(""));
 
-    for (key, value) in &req.headers {
-        req_lines.push(Line::from(vec![
-            Span::styled(key, Style::default().fg(Color::Cyan)),
-            Span::raw(": "),
-            Span::raw(value),
-        ]));
-    }
+    req_lines.extend(crate::tui::widgets::header_lines(&req.headers));
 
     if !req.body.is_empty() {
         req_lines.push(Line::raw(""));
@@ -344,13 +338,7 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
 
             resp_lines.push(Line::raw(""));
 
-            for (key, value) in &resp.headers {
-                resp_lines.push(Line::from(vec![
-                    Span::styled(key, Style::default().fg(Color::Cyan)),
-                    Span::raw(": "),
-                    Span::raw(value),
-                ]));
-            }
+            resp_lines.extend(crate::tui::widgets::header_lines(&resp.headers));
 
             if !resp.body.is_empty() {
                 resp_lines.push(Line::raw(""));
@@ -361,27 +349,7 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
             }
 
             if !resp.trailers.is_empty() {
-                resp_lines.push(Line::raw(""));
-                resp_lines.push(Line::styled(
-                    "──── Trailers ────",
-                    Style::default().fg(Color::DarkGray),
-                ));
-                for (key, value) in &resp.trailers {
-                    let value_style = if key == "grpc-status" {
-                        if value == "0" {
-                            Style::default().fg(Color::Green)
-                        } else {
-                            Style::default().fg(Color::Red)
-                        }
-                    } else {
-                        Style::default()
-                    };
-                    resp_lines.push(Line::from(vec![
-                        Span::styled(key, Style::default().fg(Color::Cyan)),
-                        Span::raw(": "),
-                        Span::styled(value, value_style),
-                    ]));
-                }
+                resp_lines.extend(crate::tui::widgets::trailer_lines(&resp.trailers));
             }
         }
         None => {
@@ -617,5 +585,3 @@ fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntr
 
     frame.render_widget(widget, area);
 }
-
-use crate::tui::widgets::format_size;

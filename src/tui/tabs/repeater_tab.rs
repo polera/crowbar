@@ -7,7 +7,7 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::http::codec;
 use crate::http::sequence::StepState;
-use crate::tui::widgets::{body_view, diff_view, logo};
+use crate::tui::widgets::{body_view, diff_view, dim_style, format_size, key_style, logo};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
@@ -221,13 +221,7 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
         ]));
         lines.push(Line::raw(""));
 
-        for (key, value) in &resp.headers {
-            lines.push(Line::from(vec![
-                Span::styled(key, Style::default().fg(Color::Cyan)),
-                Span::raw(": "),
-                Span::raw(value),
-            ]));
-        }
+        lines.extend(crate::tui::widgets::header_lines(&resp.headers));
 
         if !resp.body.is_empty() {
             lines.push(Line::raw(""));
@@ -238,27 +232,7 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
         }
 
         if !resp.trailers.is_empty() {
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                "──── Trailers ────",
-                Style::default().fg(Color::DarkGray),
-            ));
-            for (key, value) in &resp.trailers {
-                let value_style = if key == "grpc-status" {
-                    if value == "0" {
-                        Style::default().fg(Color::Green)
-                    } else {
-                        Style::default().fg(Color::Red)
-                    }
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(key, Style::default().fg(Color::Cyan)),
-                    Span::raw(": "),
-                    Span::styled(value, value_style),
-                ]));
-            }
+            lines.extend(crate::tui::widgets::trailer_lines(&resp.trailers));
         }
 
         Text::from(lines)
@@ -439,13 +413,7 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
         Span::raw(&step.request.uri),
     ]));
 
-    for (key, value) in &step.request.headers {
-        lines.push(Line::from(vec![
-            Span::styled(key, Style::default().fg(Color::Cyan)),
-            Span::raw(": "),
-            Span::raw(value),
-        ]));
-    }
+    lines.extend(crate::tui::widgets::header_lines(&step.request.headers));
 
     if let Some(ref resp) = step.response {
         lines.push(Line::raw(""));
@@ -462,13 +430,7 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(format_size(resp.body.len()), Style::default().fg(Color::DarkGray)),
         ]));
 
-        for (key, value) in &resp.headers {
-            lines.push(Line::from(vec![
-                Span::styled(key, Style::default().fg(Color::Cyan)),
-                Span::raw(": "),
-                Span::raw(value),
-            ]));
-        }
+        lines.extend(crate::tui::widgets::header_lines(&resp.headers));
 
         if !resp.body.is_empty() {
             lines.push(Line::raw(""));
@@ -479,18 +441,7 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
         }
 
         if !resp.trailers.is_empty() {
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                "──── Trailers ────",
-                Style::default().fg(Color::DarkGray),
-            ));
-            for (key, value) in &resp.trailers {
-                lines.push(Line::from(vec![
-                    Span::styled(key, Style::default().fg(Color::Cyan)),
-                    Span::raw(": "),
-                    Span::raw(value),
-                ]));
-            }
+            lines.extend(crate::tui::widgets::trailer_lines(&resp.trailers));
         }
     } else if let Some(ref err) = step.error {
         lines.push(Line::raw(""));
@@ -557,5 +508,3 @@ fn render_macro_actions(app: &App, frame: &mut Frame, area: Rect) {
     );
     frame.render_widget(widget, area);
 }
-
-use crate::tui::widgets::{format_size, key_style, dim_style};

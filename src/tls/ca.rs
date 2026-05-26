@@ -7,8 +7,11 @@ use rcgen::{
 use tracing::info;
 
 pub struct CertificateAuthority {
+    /// Re-derived signing cert used only as the issuer for leaf cert generation.
+    /// Serial/validity may differ from `ca_cert_pem` since rcgen cannot parse existing PEM certs.
     pub ca_cert: Certificate,
     pub ca_key: KeyPair,
+    /// On-disk PEM — the canonical cert for trust store installation.
     pub ca_cert_pem: String,
 }
 

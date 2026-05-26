@@ -156,13 +156,7 @@ async fn parse_h2_response(
     let trailers_hm = collected.trailers().cloned();
     let body = collected.to_bytes();
 
-    let trailers: Vec<(String, String)> = trailers_hm
-        .map(|t| {
-            t.iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let trailers = crate::http::models::extract_trailers(trailers_hm.as_ref());
 
     let resp_body = if body.is_empty() && !trailers.is_empty() {
         Bytes::new()

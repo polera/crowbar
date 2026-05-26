@@ -4,11 +4,10 @@ use std::time::Instant;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
-use hyper::client::conn::http1::Builder as ClientBuilder;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::channel::ProxyToUi;
 use crate::http::models::{RequestData, RequestId};
@@ -145,85 +144,28 @@ impl ProxyHandler {
                     request_id,
                     format!("Connection failed: {}", e),
                 ));
-                return Ok(Response::builder()
-                    .status(502)
-                    .body(Full::new(Bytes::from(format!(
-                        "Failed to connect to upstream: {}",
-                        e
-                    ))))
-                    .unwrap());
+                return Ok(crate::proxy::bad_gateway(&format!(
+                    "Failed to connect to upstream: {}",
+                    e
+                )));
             }
         };
 
         let io = TokioIo::new(upstream);
-        let (mut sender, conn) = match ClientBuilder::new()
-            .preserve_header_case(true)
-            .title_case_headers(true)
-            .handshake(io)
-            .await
-        {
-            Ok(pair) => pair,
-            Err(e) => {
-                warn!("Upstream handshake failed for {}: {}", addr, e);
-                let _ = self.ctx.ui_tx.send(ProxyToUi::RequestError(
-                    request_id,
-                    format!("Handshake failed: {}", e),
-                ));
-                return Ok(Response::builder()
-                    .status(502)
-                    .body(Full::new(Bytes::from(format!(
-                        "Upstream handshake failed: {}",
-                        e
-                    ))))
-                    .unwrap());
-            }
-        };
-
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                debug!("Upstream connection task ended: {}", e);
-            }
-        });
-
         let path_and_query = parts
             .uri
             .path_and_query()
             .map(|pq| pq.as_str())
             .unwrap_or("/");
 
-        let mut upstream_req = crate::proxy::build_forwarding_request(
-            parts.method.as_str(),
+        Ok(crate::proxy::forward_h1(
+            io,
+            parts.version,
             path_and_query,
-            &request_data.headers,
-            request_data.body.clone(),
-        );
-        *upstream_req.version_mut() = parts.version;
-
-        let upstream_resp = match sender.send_request(upstream_req).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                warn!("Upstream request failed for {}: {}", addr, e);
-                let _ = self.ctx.ui_tx.send(ProxyToUi::RequestError(
-                    request_id,
-                    format!("Request failed: {}", e),
-                ));
-                return Ok(Response::builder()
-                    .status(502)
-                    .body(Full::new(Bytes::from(format!(
-                        "Upstream request failed: {}",
-                        e
-                    ))))
-                    .unwrap());
-            }
-        };
-
-        Ok(crate::proxy::process_h1_response(
-            upstream_resp,
-            request_id,
+            &request_data,
             start,
             in_scope,
-            &self.ctx.rules,
-            &self.ctx.ui_tx,
+            &self.ctx,
         )
         .await)
     }

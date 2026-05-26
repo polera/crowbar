@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::tui::widgets::logo;
+use crate::tui::widgets::{dim_style as dim_key_style, key_style, logo};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
@@ -111,13 +111,7 @@ fn render_current_request(app: &App, frame: &mut Frame, area: Rect) {
         ]));
         lines.push(Line::raw(""));
 
-        for (key, value) in &req.headers {
-            lines.push(Line::from(vec![
-                Span::styled(key, Style::default().fg(Color::Cyan)),
-                Span::raw(": "),
-                Span::raw(value),
-            ]));
-        }
+        lines.extend(crate::tui::widgets::header_lines(&req.headers));
 
         if !req.body.is_empty() {
             lines.push(Line::raw(""));
@@ -239,5 +233,3 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
     );
     frame.render_widget(widget, area);
 }
-
-use crate::tui::widgets::{key_style, dim_style as dim_key_style};
