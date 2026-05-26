@@ -457,15 +457,18 @@ impl App {
         }
         let macro_requests: Vec<_> = self.macros.steps.iter().map(|s| s.request.clone()).collect();
         let session = crate::http::session::Session::new(self.store.entries().to_vec(), macro_requests);
-        match serde_json::to_string_pretty(&session) {
-            Ok(json) => match std::fs::write(path, json) {
-                Ok(()) => {
-                    self.set_status(format!("Saved to {}", path.display()));
+        match std::fs::File::create(path) {
+            Ok(file) => {
+                let writer = std::io::BufWriter::new(file);
+                match serde_json::to_writer_pretty(writer, &session) {
+                    Ok(()) => {
+                        self.set_status(format!("Saved to {}", path.display()));
+                    }
+                    Err(e) => {
+                        self.set_status(format!("Save failed: {}", e));
+                    }
                 }
-                Err(e) => {
-                    self.set_status(format!("Save failed: {}", e));
-                }
-            },
+            }
             Err(e) => {
                 self.set_status(format!("Save failed: {}", e));
             }

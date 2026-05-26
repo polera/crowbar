@@ -116,8 +116,14 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
     .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
     .height(1);
 
+    let visible_height = area.height.saturating_sub(3) as usize;
+    let selected = app.history.selected;
+    let offset = selected.saturating_sub(visible_height.saturating_sub(1));
+
     let rows: Vec<Row> = filtered
         .iter()
+        .skip(offset)
+        .take(visible_height)
         .map(|entry| {
             let req = &entry.request;
 
@@ -232,7 +238,7 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
         .row_highlight_style(highlight_style);
 
     let mut state = TableState::default();
-    state.select(Some(app.history.selected));
+    state.select(Some(selected.saturating_sub(offset)));
 
     frame.render_stateful_widget(table, area, &mut state);
 }

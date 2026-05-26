@@ -27,20 +27,20 @@ pub fn dim_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-pub fn header_lines(headers: &[(String, String)]) -> Vec<Line<'static>> {
+pub fn header_lines<'a>(headers: &'a [(String, String)]) -> Vec<Line<'a>> {
     headers
         .iter()
         .map(|(k, v)| {
             Line::from(vec![
-                Span::styled(k.clone(), Style::default().fg(Color::Cyan)),
+                Span::styled(k.as_str(), Style::default().fg(Color::Cyan)),
                 Span::raw(": "),
-                Span::raw(v.clone()),
+                Span::raw(v.as_str()),
             ])
         })
         .collect()
 }
 
-pub fn trailer_lines(trailers: &[(String, String)]) -> Vec<Line<'static>> {
+pub fn trailer_lines<'a>(trailers: &'a [(String, String)]) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::raw(""),
         Line::styled(
@@ -59,9 +59,9 @@ pub fn trailer_lines(trailers: &[(String, String)]) -> Vec<Line<'static>> {
             Style::default()
         };
         lines.push(Line::from(vec![
-            Span::styled(key.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(key.as_str(), Style::default().fg(Color::Cyan)),
             Span::raw(": "),
-            Span::styled(value.clone(), value_style),
+            Span::styled(value.as_str(), value_style),
         ]));
     }
     lines

@@ -1,8 +1,14 @@
+use std::cell::RefCell;
+
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::http::protobuf::{self, ProtoField, ProtoValue};
 use crate::tui::widgets::hex_view;
+
+thread_local! {
+    static JSON_CACHE: RefCell<Option<(*const u8, usize, String)>> = const { RefCell::new(None) };
+}
 
 pub fn body_lines<'a>(
     body: &[u8],
@@ -62,9 +68,28 @@ fn render_plain<'a>(text: &str, max_lines: usize) -> Vec<Line<'a>> {
 }
 
 fn render_json<'a>(text: &str, max_lines: usize) -> Vec<Line<'a>> {
-    let pretty = match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(val) => serde_json::to_string_pretty(&val).unwrap_or_else(|_| text.to_string()),
-        Err(_) => return render_plain(text, max_lines),
+    let key = (text.as_ptr(), text.len());
+    let pretty = JSON_CACHE.with(|cache| {
+        let cached = cache.borrow();
+        if let Some((ptr, len, ref s)) = *cached
+            && ptr == key.0 && len == key.1 {
+                return Some(s.clone());
+            }
+        None
+    });
+
+    let pretty = match pretty {
+        Some(s) => s,
+        None => {
+            let s = match serde_json::from_str::<serde_json::Value>(text) {
+                Ok(val) => serde_json::to_string_pretty(&val).unwrap_or_else(|_| text.to_string()),
+                Err(_) => return render_plain(text, max_lines),
+            };
+            JSON_CACHE.with(|cache| {
+                *cache.borrow_mut() = Some((key.0, key.1, s.clone()));
+            });
+            s
+        }
     };
 
     let mut lines: Vec<Line<'a>> = Vec::new();
