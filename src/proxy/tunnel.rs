@@ -86,7 +86,7 @@ async fn run_h1_tunnel(
     Ok(())
 }
 
-fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
+pub(crate) fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
     req.headers()
         .get(hyper::header::UPGRADE)
         .and_then(|v| v.to_str().ok())
