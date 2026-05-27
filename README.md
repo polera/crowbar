@@ -29,6 +29,7 @@ A terminal-based web security testing proxy built in Rust. Intercept, inspect, a
 - **Macros / Sequences** — Build ordered sequences of requests from history, then execute them step-by-step with per-step status tracking
 - **Match & Replace Rules** — Modify requests, responses, or both automatically using regex or literal patterns across URL, headers, body, or all scopes; import and export rule sets as JSON
 - **WebSocket Support** — Intercept, relay, and display WebSocket text and binary frames with direction and timestamp tracking
+- **gRPC Inspection** — Automatic detection of `application/grpc` traffic with protobuf frame extraction, compressed-flag tracking, and per-message display in the history detail view
 - **Scope Filtering** — Limit capture to specific hosts or wildcard domain patterns (e.g. `*.example.com`)
 - **Passive Scanning** — Flag common security issues: missing HSTS/CSP/X-Frame-Options/X-Content-Type-Options headers, server/X-Powered-By information disclosure, insecure cookie flags (Secure, HttpOnly, SameSite), 5xx errors, and stack trace detection (Java, Python, .NET, Go)
 - **Session Persistence** — Save (`Ctrl+S`) and load sessions to pick up where you left off; auto-generated timestamped session names; repeater macros are persisted with the session
@@ -92,6 +93,9 @@ crowbar --scope '*.example.com' --scope 'api.internal.dev'
 
 # Load a previous session
 crowbar --load ~/.crowbar/sessions/my-session.json
+
+# Use a custom config file
+crowbar --config /path/to/config.toml
 ```
 
 ### CA Certificate
@@ -148,7 +152,7 @@ CLI flags override config file values.
 The interface is organized into five tabs, switchable with `Tab`/`Shift+Tab` or number keys `1`–`5`. If the default port is in use, Crowbar automatically tries the next available port (up to 25 consecutive ports from the base).
 
 1. **Proxy** — Live intercept queue, toggle intercept on/off, forward/drop/edit queued requests, change bind address, edit scope patterns, export CA certificate
-2. **History** — Table of all captured requests (method, host, path, status, size, time) with filter bar, detail view showing request/response headers and bodies, security findings, and WebSocket messages
+2. **History** — Table of all captured requests (method, host, path, status, size, time) with filter bar, detail view showing request/response headers and bodies, security findings, WebSocket messages, and gRPC frames
 3. **Repeater** — Load a request from history, edit it freely, send it, and view the response; toggle a diff view to compare changes; manage macro sequences
 4. **Rules** — Create, edit, enable/disable, and delete match & replace rules with configurable target (request/response/both), scope (URL/headers/body/all), and regex support
 5. **Tools** — Cycle through encoding utilities (URL, Base64, Hex encode/decode) with a live input/output editor and clipboard copy
