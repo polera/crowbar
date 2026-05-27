@@ -89,6 +89,15 @@ pub struct RequestData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimingData {
+    pub tcp_connect: Option<Duration>,
+    pub tls_handshake: Option<Duration>,
+    pub http_handshake: Option<Duration>,
+    pub time_to_first_byte: Option<Duration>,
+    pub content_transfer: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseData {
     pub status: u16,
     pub reason: String,
@@ -99,6 +108,8 @@ pub struct ResponseData {
     #[serde(default)]
     pub trailers: Vec<(String, String)>,
     pub duration: Duration,
+    #[serde(default)]
+    pub timing: Option<TimingData>,
 }
 
 impl ResponseData {
@@ -236,6 +247,286 @@ impl HistoryEntry {
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_id_monotonic() {
+        let a = RequestId::next();
+        let b = RequestId::next();
+        assert!(b.0 > a.0);
+    }
+
+    #[test]
+    fn request_id_display() {
+        let id = RequestId(42);
+        assert_eq!(format!("{}", id), "42");
+    }
+
+    #[test]
+    fn http_version_display() {
+        assert_eq!(format!("{}", HttpVersion::Http10), "HTTP/1.0");
+        assert_eq!(format!("{}", HttpVersion::Http11), "HTTP/1.1");
+        assert_eq!(format!("{}", HttpVersion::Http2), "HTTP/2");
+    }
+
+    #[test]
+    fn http_version_from_hyper() {
+        assert_eq!(HttpVersion::from(hyper::Version::HTTP_10), HttpVersion::Http10);
+        assert_eq!(HttpVersion::from(hyper::Version::HTTP_11), HttpVersion::Http11);
+        assert_eq!(HttpVersion::from(hyper::Version::HTTP_2), HttpVersion::Http2);
+    }
+
+    #[test]
+    fn http_version_unknown_defaults_to_http11() {
+        assert_eq!(HttpVersion::from(hyper::Version::HTTP_3), HttpVersion::Http11);
+    }
+
+    #[test]
+    fn status_reason_known() {
+        assert_eq!(status_reason(200), "OK");
+        assert_eq!(status_reason(404), "Not Found");
+        assert_eq!(status_reason(500), "Internal Server Error");
+    }
+
+    #[test]
+    fn status_reason_unknown() {
+        assert_eq!(status_reason(999), "");
+    }
+
+    #[test]
+    fn grpc_status_name_known_codes() {
+        assert_eq!(grpc_status_name(0), "OK");
+        assert_eq!(grpc_status_name(1), "CANCELLED");
+        assert_eq!(grpc_status_name(5), "NOT_FOUND");
+        assert_eq!(grpc_status_name(13), "INTERNAL");
+        assert_eq!(grpc_status_name(16), "UNAUTHENTICATED");
+    }
+
+    #[test]
+    fn grpc_status_name_unknown_code() {
+        assert_eq!(grpc_status_name(17), "UNKNOWN");
+        assert_eq!(grpc_status_name(999), "UNKNOWN");
+    }
+
+    #[test]
+    fn response_grpc_status_from_trailers() {
+        let resp = ResponseData {
+            status: 200,
+            reason: "OK".into(),
+            version: HttpVersion::Http2,
+            headers: vec![],
+            body: Bytes::new(),
+            trailers: vec![("grpc-status".into(), "0".into())],
+            duration: Duration::from_millis(10),
+            timing: None,
+        };
+        assert_eq!(resp.grpc_status(), Some((0, "OK")));
+    }
+
+    #[test]
+    fn response_grpc_status_from_headers() {
+        let resp = ResponseData {
+            status: 200,
+            reason: "OK".into(),
+            version: HttpVersion::Http2,
+            headers: vec![("grpc-status".into(), "13".into())],
+            body: Bytes::new(),
+            trailers: vec![],
+            duration: Duration::from_millis(10),
+            timing: None,
+        };
+        assert_eq!(resp.grpc_status(), Some((13, "INTERNAL")));
+    }
+
+    #[test]
+    fn response_grpc_status_none_when_missing() {
+        let resp = ResponseData {
+            status: 200,
+            reason: "OK".into(),
+            version: HttpVersion::Http2,
+            headers: vec![],
+            body: Bytes::new(),
+            trailers: vec![],
+            duration: Duration::from_millis(10),
+            timing: None,
+        };
+        assert_eq!(resp.grpc_status(), None);
+    }
+
+    #[test]
+    fn response_grpc_message_from_trailers() {
+        let resp = ResponseData {
+            status: 200,
+            reason: "OK".into(),
+            version: HttpVersion::Http2,
+            headers: vec![],
+            body: Bytes::new(),
+            trailers: vec![("grpc-message".into(), "not found".into())],
+            duration: Duration::from_millis(10),
+            timing: None,
+        };
+        assert_eq!(resp.grpc_message(), Some("not found"));
+    }
+
+    #[test]
+    fn ws_message_type_checks() {
+        let text_msg = WsMessage {
+            direction: MessageDirection::ClientToServer,
+            opcode: 1,
+            payload: Bytes::from("hello"),
+            timestamp: SystemTime::now(),
+        };
+        assert!(text_msg.is_text());
+        assert!(!text_msg.is_binary());
+        assert!(!text_msg.is_close());
+        assert_eq!(text_msg.text(), Some("hello"));
+
+        let binary_msg = WsMessage {
+            direction: MessageDirection::ServerToClient,
+            opcode: 2,
+            payload: Bytes::from(vec![0xFF, 0x00]),
+            timestamp: SystemTime::now(),
+        };
+        assert!(!binary_msg.is_text());
+        assert!(binary_msg.is_binary());
+        assert_eq!(binary_msg.text(), None);
+
+        let close_msg = WsMessage {
+            direction: MessageDirection::ClientToServer,
+            opcode: 8,
+            payload: Bytes::new(),
+            timestamp: SystemTime::now(),
+        };
+        assert!(close_msg.is_close());
+    }
+
+    #[test]
+    fn ws_message_text_invalid_utf8() {
+        let msg = WsMessage {
+            direction: MessageDirection::ClientToServer,
+            opcode: 1,
+            payload: Bytes::from(vec![0xFF, 0xFE]),
+            timestamp: SystemTime::now(),
+        };
+        assert_eq!(msg.text(), None);
+    }
+
+    fn make_entry(method: &str, host: &str, uri: &str, is_grpc: bool, status: Option<u16>) -> HistoryEntry {
+        let request = RequestData {
+            id: RequestId(1),
+            method: method.into(),
+            uri: uri.into(),
+            host: host.into(),
+            version: HttpVersion::Http11,
+            headers: vec![],
+            body: Bytes::new(),
+            is_tls: false,
+            is_grpc,
+            timestamp: SystemTime::now(),
+        };
+        let response = status.map(|s| ResponseData {
+            status: s,
+            reason: "OK".into(),
+            version: HttpVersion::Http11,
+            headers: vec![],
+            body: Bytes::new(),
+            trailers: vec![],
+            duration: Duration::from_millis(10),
+            timing: None,
+        });
+        let state = if response.is_some() { EntryState::Complete } else { EntryState::Pending };
+        HistoryEntry {
+            request,
+            response,
+            state,
+            error_message: None,
+            ws_messages: vec![],
+            grpc_messages: vec![],
+            findings: vec![],
+        }
+    }
+
+    #[test]
+    fn matches_filter_by_method() {
+        let entry = make_entry("POST", "example.com", "/api", false, Some(200));
+        assert!(entry.matches_filter("post"));
+        assert!(!entry.matches_filter("get"));
+    }
+
+    #[test]
+    fn matches_filter_by_host() {
+        let entry = make_entry("GET", "example.com", "/", false, Some(200));
+        assert!(entry.matches_filter("example"));
+    }
+
+    #[test]
+    fn matches_filter_by_uri() {
+        let entry = make_entry("GET", "example.com", "/api/users", false, Some(200));
+        assert!(entry.matches_filter("/api"));
+    }
+
+    #[test]
+    fn matches_filter_by_status() {
+        let entry = make_entry("GET", "example.com", "/", false, Some(404));
+        assert!(entry.matches_filter("404"));
+    }
+
+    #[test]
+    fn matches_filter_grpc_keyword() {
+        let entry = make_entry("POST", "example.com", "/svc", true, Some(200));
+        assert!(entry.matches_filter("grpc"));
+        assert!(entry.matches_filter("grp"));
+    }
+
+    #[test]
+    fn matches_filter_no_match() {
+        let entry = make_entry("GET", "example.com", "/", false, Some(200));
+        assert!(!entry.matches_filter("zzz"));
+    }
+
+    #[test]
+    fn extract_headers_basic() {
+        let mut map = hyper::HeaderMap::new();
+        map.insert("content-type", "text/html".parse().unwrap());
+        map.insert("x-custom", "value".parse().unwrap());
+        let headers = extract_headers(&map);
+        assert_eq!(headers.len(), 2);
+        assert!(headers.iter().any(|(k, v)| k == "content-type" && v == "text/html"));
+    }
+
+    #[test]
+    fn extract_trailers_none() {
+        assert!(extract_trailers(None).is_empty());
+    }
+
+    #[test]
+    fn extract_trailers_some() {
+        let mut map = hyper::HeaderMap::new();
+        map.insert("grpc-status", "0".parse().unwrap());
+        let trailers = extract_trailers(Some(&map));
+        assert_eq!(trailers.len(), 1);
+        assert_eq!(trailers[0], ("grpc-status".into(), "0".into()));
+    }
+
+    #[test]
+    fn bytes_base64_roundtrip() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(with = "super::bytes_base64")]
+            data: Bytes,
+        }
+
+        let original = Wrapper { data: Bytes::from("hello world") };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Wrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
     }
 }
 

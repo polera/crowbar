@@ -92,3 +92,134 @@ pub(crate) fn url_decode(input: &str) -> String {
     }
     String::from_utf8_lossy(&result).into_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leap_year_divisible_by_4() {
+        assert!(is_leap(2024));
+        assert!(is_leap(2004));
+    }
+
+    #[test]
+    fn leap_year_century_not_leap() {
+        assert!(!is_leap(1900));
+        assert!(!is_leap(2100));
+    }
+
+    #[test]
+    fn leap_year_400_is_leap() {
+        assert!(is_leap(2000));
+        assert!(is_leap(1600));
+    }
+
+    #[test]
+    fn non_leap_year() {
+        assert!(!is_leap(2001));
+        assert!(!is_leap(2023));
+    }
+
+    #[test]
+    fn month_lengths_leap() {
+        let months = month_lengths(2024);
+        assert_eq!(months[1], 29);
+        assert_eq!(months[0], 31);
+        assert_eq!(months[3], 30);
+    }
+
+    #[test]
+    fn month_lengths_non_leap() {
+        let months = month_lengths(2023);
+        assert_eq!(months[1], 28);
+    }
+
+    #[test]
+    fn days_to_date_epoch() {
+        assert_eq!(days_to_date(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn days_to_date_known_date() {
+        // 2024-01-01 is 19723 days from epoch
+        let (y, m, d) = days_to_date(19723);
+        assert_eq!((y, m, d), (2024, 1, 1));
+    }
+
+    #[test]
+    fn days_to_date_feb_29_leap() {
+        // 2024-02-29
+        let days = date_to_days(2024, 2, 29);
+        assert_eq!(days_to_date(days), (2024, 2, 29));
+    }
+
+    #[test]
+    fn date_to_days_epoch() {
+        assert_eq!(date_to_days(1970, 1, 1), 0);
+    }
+
+    #[test]
+    fn date_days_roundtrip() {
+        for (y, m, d) in [(1970, 1, 1), (2000, 6, 15), (2024, 12, 31), (1999, 2, 28)] {
+            let days = date_to_days(y, m, d);
+            assert_eq!(days_to_date(days), (y, m, d), "roundtrip failed for {y}-{m}-{d}");
+        }
+    }
+
+    #[test]
+    fn extract_path_with_scheme() {
+        assert_eq!(extract_path("https://example.com/foo/bar"), "/foo/bar");
+    }
+
+    #[test]
+    fn extract_path_with_scheme_no_path() {
+        assert_eq!(extract_path("https://example.com"), "/");
+    }
+
+    #[test]
+    fn extract_path_already_path() {
+        assert_eq!(extract_path("/api/v1"), "/api/v1");
+    }
+
+    #[test]
+    fn extract_path_no_scheme_no_slash() {
+        assert_eq!(extract_path("example.com"), "/");
+    }
+
+    #[test]
+    fn extract_path_with_query() {
+        assert_eq!(extract_path("https://example.com/search?q=test"), "/search?q=test");
+    }
+
+    #[test]
+    fn url_decode_percent_encoding() {
+        assert_eq!(url_decode("hello%20world"), "hello world");
+        assert_eq!(url_decode("%3Fquery%3Dvalue"), "?query=value");
+    }
+
+    #[test]
+    fn url_decode_plus_as_space() {
+        assert_eq!(url_decode("hello+world"), "hello world");
+    }
+
+    #[test]
+    fn url_decode_no_encoding() {
+        assert_eq!(url_decode("plain"), "plain");
+    }
+
+    #[test]
+    fn url_decode_mixed() {
+        assert_eq!(url_decode("a+b%26c"), "a b&c");
+    }
+
+    #[test]
+    fn url_decode_incomplete_percent() {
+        assert_eq!(url_decode("abc%2"), "abc%2");
+    }
+
+    #[test]
+    fn url_decode_invalid_hex() {
+        assert_eq!(url_decode("abc%ZZ"), "abc%ZZ");
+    }
+}

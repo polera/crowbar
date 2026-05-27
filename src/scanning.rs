@@ -217,6 +217,7 @@ mod tests {
             body: Bytes::from(body.to_string()),
             trailers: Vec::new(),
             duration: Duration::from_millis(50),
+            timing: None,
         }
     }
 
@@ -260,5 +261,196 @@ mod tests {
         let resp = make_response(vec![], "Error: Traceback (most recent call last):\n  File app.py");
         let findings = scan_response(&req, &resp);
         assert!(findings.iter().any(|f| f.severity == Severity::High));
+    }
+
+    #[test]
+    fn stack_trace_java() {
+        let req = make_request(false);
+        let resp = make_response(vec![], "Exception at java.lang.NullPointerException");
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.title.contains("Stack trace")));
+    }
+
+    #[test]
+    fn stack_trace_go_panic() {
+        let req = make_request(false);
+        let resp = make_response(vec![], "panic: runtime error: index out of range");
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.severity == Severity::High));
+    }
+
+    #[test]
+    fn stack_trace_dotnet() {
+        let req = make_request(false);
+        let resp = make_response(vec![], "System.NullReferenceException: Object reference");
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.severity == Severity::High));
+    }
+
+    #[test]
+    fn no_stack_trace_in_clean_body() {
+        let req = make_request(false);
+        let resp = make_response(vec![], "<html><body>Hello World</body></html>");
+        let findings = scan_response(&req, &resp);
+        assert!(!findings.iter().any(|f| f.title.contains("Stack trace")));
+    }
+
+    #[test]
+    fn binary_body_skips_pattern_check() {
+        let req = make_request(false);
+        let resp = ResponseData {
+            status: 200,
+            reason: "OK".into(),
+            version: HttpVersion::Http11,
+            headers: vec![],
+            body: Bytes::from(vec![0xFF, 0xFE, 0x00]),
+            trailers: Vec::new(),
+            duration: Duration::from_millis(50),
+            timing: None,
+        };
+        let findings = scan_response(&req, &resp);
+        assert!(!findings.iter().any(|f| f.title.contains("Stack trace")));
+    }
+
+    #[test]
+    fn server_error_500() {
+        let req = make_request(false);
+        let resp = ResponseData {
+            status: 500,
+            reason: "Internal Server Error".into(),
+            version: HttpVersion::Http11,
+            headers: vec![],
+            body: Bytes::new(),
+            trailers: Vec::new(),
+            duration: Duration::from_millis(50),
+            timing: None,
+        };
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.title.contains("Server error")));
+    }
+
+    #[test]
+    fn server_error_503() {
+        let req = make_request(false);
+        let resp = ResponseData {
+            status: 503,
+            reason: "Service Unavailable".into(),
+            version: HttpVersion::Http11,
+            headers: vec![],
+            body: Bytes::new(),
+            trailers: Vec::new(),
+            duration: Duration::from_millis(50),
+            timing: None,
+        };
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.title.contains("Server error")));
+    }
+
+    #[test]
+    fn no_server_error_on_4xx() {
+        let req = make_request(false);
+        let resp = ResponseData {
+            status: 404,
+            reason: "Not Found".into(),
+            version: HttpVersion::Http11,
+            headers: vec![],
+            body: Bytes::new(),
+            trailers: Vec::new(),
+            duration: Duration::from_millis(50),
+            timing: None,
+        };
+        let findings = scan_response(&req, &resp);
+        assert!(!findings.iter().any(|f| f.title.contains("Server error")));
+    }
+
+    #[test]
+    fn x_powered_by_disclosure() {
+        let req = make_request(false);
+        let resp = make_response(vec![("X-Powered-By", "Express")], "");
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.title.contains("X-Powered-By")));
+    }
+
+    #[test]
+    fn missing_csp() {
+        let req = make_request(false);
+        let resp = make_response(vec![], "");
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.title.contains("Content-Security-Policy")));
+    }
+
+    #[test]
+    fn missing_x_frame_options() {
+        let req = make_request(false);
+        let resp = make_response(vec![], "");
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.title.contains("X-Frame-Options")));
+    }
+
+    #[test]
+    fn missing_x_content_type_options() {
+        let req = make_request(false);
+        let resp = make_response(vec![], "");
+        let findings = scan_response(&req, &resp);
+        assert!(findings.iter().any(|f| f.title.contains("X-Content-Type-Options")));
+    }
+
+    #[test]
+    fn all_security_headers_present() {
+        let req = make_request(true);
+        let resp = make_response(
+            vec![
+                ("strict-transport-security", "max-age=31536000"),
+                ("content-security-policy", "default-src 'self'"),
+                ("x-frame-options", "DENY"),
+                ("x-content-type-options", "nosniff"),
+            ],
+            "",
+        );
+        let findings = scan_response(&req, &resp);
+        assert!(!findings.iter().any(|f| f.title.contains("Missing")));
+    }
+
+    #[test]
+    fn cookie_with_all_flags_no_findings() {
+        let req = make_request(true);
+        let resp = make_response(
+            vec![("Set-Cookie", "id=abc; Secure; HttpOnly; SameSite=Strict; Path=/")],
+            "",
+        );
+        let findings = scan_response(&req, &resp);
+        assert!(!findings.iter().any(|f| f.title.contains("Cookie")));
+    }
+
+    #[test]
+    fn cookie_secure_not_needed_on_http() {
+        let req = make_request(false);
+        let resp = make_response(
+            vec![("Set-Cookie", "id=abc; HttpOnly; SameSite=Strict; Path=/")],
+            "",
+        );
+        let findings = scan_response(&req, &resp);
+        assert!(!findings.iter().any(|f| f.title.contains("Secure")));
+    }
+
+    #[test]
+    fn severity_labels() {
+        assert_eq!(Severity::Info.label(), "INFO");
+        assert_eq!(Severity::Low.label(), "LOW");
+        assert_eq!(Severity::Medium.label(), "MED");
+        assert_eq!(Severity::High.label(), "HIGH");
+    }
+
+    #[test]
+    fn truncate_cookie_short() {
+        assert_eq!(truncate_cookie("session=abc"), "session=abc");
+    }
+
+    #[test]
+    fn truncate_cookie_long() {
+        let long = "a".repeat(100);
+        let truncated = truncate_cookie(&long);
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.len(), 60);
     }
 }

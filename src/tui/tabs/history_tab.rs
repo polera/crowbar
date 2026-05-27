@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::http::models::EntryState;
-use crate::tui::widgets::{body_view, format_size, logo};
+use crate::tui::widgets::{body_view, format_size, logo, timing_view};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let filtered = app.store.filtered_entries_all();
@@ -341,6 +341,11 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
                         }
                     resp_lines.push(Line::from(grpc_spans));
                 }
+
+            if let Some(timing) = &resp.timing {
+                resp_lines.push(Line::raw(""));
+                resp_lines.extend(timing_view::timing_lines(timing, resp.duration));
+            }
 
             resp_lines.push(Line::raw(""));
 

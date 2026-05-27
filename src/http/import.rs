@@ -101,6 +101,7 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         body: resp_body,
         trailers: Vec::new(),
         duration,
+        timing: None,
     };
 
     HistoryEntry {
@@ -208,4 +209,168 @@ struct HarHeader {
 #[derive(Deserialize)]
 struct HarContent {
     text: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_http_version_http10() {
+        assert_eq!(parse_http_version("HTTP/1.0"), HttpVersion::Http10);
+        assert_eq!(parse_http_version("http/1.0"), HttpVersion::Http10);
+    }
+
+    #[test]
+    fn parse_http_version_http11() {
+        assert_eq!(parse_http_version("HTTP/1.1"), HttpVersion::Http11);
+        assert_eq!(parse_http_version("unknown"), HttpVersion::Http11);
+    }
+
+    #[test]
+    fn parse_http_version_http2() {
+        assert_eq!(parse_http_version("HTTP/2"), HttpVersion::Http2);
+        assert_eq!(parse_http_version("HTTP/2.0"), HttpVersion::Http2);
+        assert_eq!(parse_http_version("h2"), HttpVersion::Http2);
+    }
+
+    #[test]
+    fn extract_host_https() {
+        assert_eq!(extract_host("https://example.com/path"), "example.com");
+    }
+
+    #[test]
+    fn extract_host_with_port() {
+        assert_eq!(extract_host("https://example.com:8443/path"), "example.com");
+    }
+
+    #[test]
+    fn extract_host_http() {
+        assert_eq!(extract_host("http://api.example.com/v1"), "api.example.com");
+    }
+
+    #[test]
+    fn extract_host_no_path() {
+        assert_eq!(extract_host("https://example.com"), "example.com");
+    }
+
+    #[test]
+    fn extract_host_no_scheme() {
+        assert_eq!(extract_host("example.com/path"), "example.com");
+    }
+
+    #[test]
+    fn parse_iso_timestamp_valid() {
+        let ts = parse_iso_timestamp("2024-01-01T00:00:00Z").unwrap();
+        let secs = ts.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(secs, 1704067200);
+    }
+
+    #[test]
+    fn parse_iso_timestamp_with_time() {
+        let ts = parse_iso_timestamp("2024-06-15T14:30:00.000Z").unwrap();
+        let secs = ts.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let expected = super::super::date_to_days(2024, 6, 15) * 86400 + 14 * 3600 + 30 * 60;
+        assert_eq!(secs, expected);
+    }
+
+    #[test]
+    fn parse_iso_timestamp_too_short() {
+        assert!(parse_iso_timestamp("2024").is_none());
+    }
+
+    #[test]
+    fn parse_iso_timestamp_invalid() {
+        assert!(parse_iso_timestamp("not-a-date-time").is_none());
+    }
+
+    #[test]
+    fn convert_har_entry_basic() {
+        let entry = HarEntry {
+            started_date_time: "2024-01-01T12:00:00Z".into(),
+            time: 150.0,
+            request: HarRequest {
+                method: "POST".into(),
+                url: "https://api.example.com/v1/users".into(),
+                http_version: "HTTP/2".into(),
+                headers: vec![
+                    HarHeader { name: "content-type".into(), value: "application/json".into() },
+                ],
+                post_data: Some(HarPostData { text: Some("{\"name\":\"test\"}".into()) }),
+            },
+            response: HarResponse {
+                status: 201,
+                status_text: "Created".into(),
+                http_version: "HTTP/2".into(),
+                headers: vec![],
+                content: HarContent { text: Some("{\"id\":1}".into()) },
+            },
+        };
+
+        let result = convert_har_entry(entry);
+        assert_eq!(result.request.method, "POST");
+        assert_eq!(result.request.host, "api.example.com");
+        assert!(result.request.is_tls);
+        assert_eq!(result.request.version, HttpVersion::Http2);
+        assert_eq!(result.request.body, Bytes::from("{\"name\":\"test\"}"));
+        assert_eq!(result.request.headers.len(), 1);
+
+        let resp = result.response.unwrap();
+        assert_eq!(resp.status, 201);
+        assert_eq!(resp.reason, "Created");
+        assert_eq!(resp.body, Bytes::from("{\"id\":1}"));
+        assert_eq!(resp.duration, Duration::from_millis(150));
+    }
+
+    #[test]
+    fn convert_har_entry_no_body() {
+        let entry = HarEntry {
+            started_date_time: "2024-01-01T00:00:00Z".into(),
+            time: 50.0,
+            request: HarRequest {
+                method: "GET".into(),
+                url: "http://example.com/".into(),
+                http_version: "HTTP/1.1".into(),
+                headers: vec![],
+                post_data: None,
+            },
+            response: HarResponse {
+                status: 200,
+                status_text: "OK".into(),
+                http_version: "HTTP/1.1".into(),
+                headers: vec![],
+                content: HarContent { text: None },
+            },
+        };
+
+        let result = convert_har_entry(entry);
+        assert!(!result.request.is_tls);
+        assert!(result.request.body.is_empty());
+        assert!(result.response.unwrap().body.is_empty());
+    }
+
+    #[test]
+    fn convert_har_entry_negative_time() {
+        let entry = HarEntry {
+            started_date_time: "2024-01-01T00:00:00Z".into(),
+            time: -1.0,
+            request: HarRequest {
+                method: "GET".into(),
+                url: "http://example.com/".into(),
+                http_version: "HTTP/1.1".into(),
+                headers: vec![],
+                post_data: None,
+            },
+            response: HarResponse {
+                status: 200,
+                status_text: "OK".into(),
+                http_version: "HTTP/1.1".into(),
+                headers: vec![],
+                content: HarContent { text: None },
+            },
+        };
+
+        let result = convert_har_entry(entry);
+        assert_eq!(result.response.unwrap().duration, Duration::from_millis(0));
+    }
 }

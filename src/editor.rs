@@ -688,3 +688,562 @@ impl TextEditor {
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn shift_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn editor(text: &str) -> TextEditor {
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        TextEditor::new(if lines.is_empty() { vec![String::new()] } else { lines }, EditorMode::Default)
+    }
+
+    fn vim_editor(text: &str) -> TextEditor {
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        TextEditor::new(if lines.is_empty() { vec![String::new()] } else { lines }, EditorMode::Vim)
+    }
+
+    // --- Constructor / basic state ---
+
+    #[test]
+    fn new_empty_lines_gets_one_empty() {
+        let ed = TextEditor::new(vec![], EditorMode::Default);
+        assert_eq!(ed.lines, vec![""]);
+        assert_eq!(ed.cursor_line, 0);
+        assert_eq!(ed.cursor_col, 0);
+    }
+
+    #[test]
+    fn has_content_empty() {
+        let ed = editor("");
+        assert!(!ed.has_content());
+    }
+
+    #[test]
+    fn has_content_with_text() {
+        let ed = editor("hello");
+        assert!(ed.has_content());
+    }
+
+    // --- EditorMode ---
+
+    #[test]
+    fn editor_mode_toggle() {
+        assert_eq!(EditorMode::Default.toggle(), EditorMode::Vim);
+        assert_eq!(EditorMode::Vim.toggle(), EditorMode::Default);
+    }
+
+    #[test]
+    fn editor_mode_label() {
+        assert_eq!(EditorMode::Default.label(), "DEFAULT");
+        assert_eq!(EditorMode::Vim.label(), "VIM");
+    }
+
+    #[test]
+    fn mode_label_default() {
+        let ed = editor("test");
+        assert_eq!(ed.mode_label(), "");
+    }
+
+    #[test]
+    fn mode_label_vim_normal() {
+        let ed = vim_editor("test");
+        assert_eq!(ed.mode_label(), "NORMAL");
+    }
+
+    #[test]
+    fn mode_label_vim_insert() {
+        let mut ed = vim_editor("test");
+        ed.vim_mode = VimMode::Insert;
+        assert_eq!(ed.mode_label(), "INSERT");
+    }
+
+    // --- Default mode editing ---
+
+    #[test]
+    fn insert_char() {
+        let mut ed = editor("");
+        ed.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(ed.lines[0], "a");
+        assert_eq!(ed.cursor_col, 1);
+    }
+
+    #[test]
+    fn insert_multiple_chars() {
+        let mut ed = editor("");
+        for c in "hello".chars() {
+            ed.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(ed.lines[0], "hello");
+        assert_eq!(ed.cursor_col, 5);
+    }
+
+    #[test]
+    fn backspace_removes_char() {
+        let mut ed = editor("abc");
+        ed.cursor_col = 3;
+        ed.handle_key(key(KeyCode::Backspace));
+        assert_eq!(ed.lines[0], "ab");
+        assert_eq!(ed.cursor_col, 2);
+    }
+
+    #[test]
+    fn backspace_at_start_joins_lines() {
+        let mut ed = editor("hello\nworld");
+        ed.cursor_line = 1;
+        ed.cursor_col = 0;
+        ed.handle_key(key(KeyCode::Backspace));
+        assert_eq!(ed.lines.len(), 1);
+        assert_eq!(ed.lines[0], "helloworld");
+        assert_eq!(ed.cursor_col, 5);
+    }
+
+    #[test]
+    fn delete_removes_char() {
+        let mut ed = editor("abc");
+        ed.cursor_col = 0;
+        ed.handle_key(key(KeyCode::Delete));
+        assert_eq!(ed.lines[0], "bc");
+    }
+
+    #[test]
+    fn delete_at_end_joins_lines() {
+        let mut ed = editor("hello\nworld");
+        ed.cursor_col = 5;
+        ed.handle_key(key(KeyCode::Delete));
+        assert_eq!(ed.lines.len(), 1);
+        assert_eq!(ed.lines[0], "helloworld");
+    }
+
+    #[test]
+    fn insert_newline_splits() {
+        let mut ed = editor("hello world");
+        ed.cursor_col = 5;
+        ed.insert_newline();
+        assert_eq!(ed.lines, vec!["hello", " world"]);
+        assert_eq!(ed.cursor_line, 1);
+        assert_eq!(ed.cursor_col, 0);
+    }
+
+    #[test]
+    fn clear_resets() {
+        let mut ed = editor("some\ntext\nhere");
+        ed.cursor_line = 2;
+        ed.cursor_col = 3;
+        ed.clear();
+        assert_eq!(ed.lines, vec![""]);
+        assert_eq!(ed.cursor_line, 0);
+        assert_eq!(ed.cursor_col, 0);
+    }
+
+    // --- Arrow key movement ---
+
+    #[test]
+    fn move_up_down() {
+        let mut ed = editor("line1\nline2\nline3");
+        ed.handle_key(key(KeyCode::Down));
+        assert_eq!(ed.cursor_line, 1);
+        ed.handle_key(key(KeyCode::Down));
+        assert_eq!(ed.cursor_line, 2);
+        ed.handle_key(key(KeyCode::Down)); // at bottom
+        assert_eq!(ed.cursor_line, 2);
+        ed.handle_key(key(KeyCode::Up));
+        assert_eq!(ed.cursor_line, 1);
+    }
+
+    #[test]
+    fn move_left_right() {
+        let mut ed = editor("abc");
+        ed.handle_key(key(KeyCode::Right));
+        assert_eq!(ed.cursor_col, 1);
+        ed.handle_key(key(KeyCode::Right));
+        ed.handle_key(key(KeyCode::Right));
+        assert_eq!(ed.cursor_col, 3);
+        ed.handle_key(key(KeyCode::Right)); // at end
+        assert_eq!(ed.cursor_col, 3);
+        ed.handle_key(key(KeyCode::Left));
+        assert_eq!(ed.cursor_col, 2);
+    }
+
+    #[test]
+    fn home_end_keys() {
+        let mut ed = editor("hello world");
+        ed.cursor_col = 5;
+        ed.handle_key(key(KeyCode::Home));
+        assert_eq!(ed.cursor_col, 0);
+        ed.handle_key(key(KeyCode::End));
+        assert_eq!(ed.cursor_col, 11);
+    }
+
+    #[test]
+    fn ctrl_home_end() {
+        let mut ed = editor("line1\nline2\nline3");
+        ed.cursor_line = 1;
+        ed.cursor_col = 3;
+        ed.handle_key(ctrl_key(KeyCode::Home));
+        assert_eq!(ed.cursor_line, 0);
+        assert_eq!(ed.cursor_col, 0);
+        ed.handle_key(ctrl_key(KeyCode::End));
+        assert_eq!(ed.cursor_line, 2);
+        assert_eq!(ed.cursor_col, 5);
+    }
+
+    #[test]
+    fn cursor_clamps_on_line_change() {
+        let mut ed = editor("long line here\nhi");
+        ed.cursor_col = 14;
+        ed.handle_key(key(KeyCode::Down));
+        assert_eq!(ed.cursor_col, 2);
+    }
+
+    // --- Esc exits default mode ---
+
+    #[test]
+    fn esc_exits_default() {
+        let mut ed = editor("test");
+        assert_eq!(ed.handle_key(key(KeyCode::Esc)), EditorAction::ExitEditor);
+    }
+
+    // --- Ctrl+Enter ---
+
+    #[test]
+    fn ctrl_enter() {
+        let mut ed = editor("test");
+        assert_eq!(ed.handle_key(ctrl_key(KeyCode::Enter)), EditorAction::CtrlEnter);
+    }
+
+    // --- Gutter width ---
+
+    #[test]
+    fn gutter_width_small() {
+        let ed = editor("a\nb");
+        assert_eq!(ed.gutter_width(), 2);
+    }
+
+    #[test]
+    fn gutter_width_100_lines() {
+        let lines: Vec<String> = (0..100).map(|i| format!("line {}", i)).collect();
+        let ed = TextEditor::new(lines, EditorMode::Default);
+        assert_eq!(ed.gutter_width(), 3);
+    }
+
+    // --- Undo ---
+
+    #[test]
+    fn undo_restores_state() {
+        let mut ed = editor("hello");
+        ed.cursor_col = 5;
+        ed.handle_key(key(KeyCode::Char('!')));
+        assert_eq!(ed.lines[0], "hello!");
+        ed.handle_key(key(KeyCode::Char('!')));
+        assert_eq!(ed.lines[0], "hello!!");
+        // Each char insert saves undo, so undo once should restore "hello!"
+        let mut ed2 = editor("hello");
+        ed2.cursor_col = 5;
+        ed2.handle_key(key(KeyCode::Char('!')));
+        ed2.handle_key(key(KeyCode::Char('!')));
+        ed2.undo();
+        assert_eq!(ed2.lines[0], "hello!");
+    }
+
+    // --- Vim normal mode ---
+
+    #[test]
+    fn vim_hjkl_movement() {
+        let mut ed = vim_editor("hello\nworld");
+        assert_eq!(ed.vim_mode, VimMode::Normal);
+
+        ed.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(ed.cursor_col, 1);
+        ed.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(ed.cursor_col, 2);
+        ed.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(ed.cursor_col, 1);
+        ed.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(ed.cursor_line, 1);
+        ed.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(ed.cursor_line, 0);
+    }
+
+    #[test]
+    fn vim_i_enters_insert() {
+        let mut ed = vim_editor("hello");
+        ed.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(ed.vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn vim_a_enters_insert_after() {
+        let mut ed = vim_editor("hello");
+        ed.cursor_col = 2;
+        ed.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(ed.vim_mode, VimMode::Insert);
+        assert_eq!(ed.cursor_col, 3);
+    }
+
+    #[test]
+    fn vim_shift_i_insert_at_start() {
+        let mut ed = vim_editor("hello");
+        ed.cursor_col = 3;
+        ed.handle_key(shift_key(KeyCode::Char('I')));
+        assert_eq!(ed.vim_mode, VimMode::Insert);
+        assert_eq!(ed.cursor_col, 0);
+    }
+
+    #[test]
+    fn vim_shift_a_insert_at_end() {
+        let mut ed = vim_editor("hello");
+        ed.handle_key(shift_key(KeyCode::Char('A')));
+        assert_eq!(ed.vim_mode, VimMode::Insert);
+        assert_eq!(ed.cursor_col, 5);
+    }
+
+    #[test]
+    fn vim_esc_from_insert_to_normal() {
+        let mut ed = vim_editor("hello");
+        ed.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(ed.vim_mode, VimMode::Insert);
+        ed.handle_key(key(KeyCode::Esc));
+        assert_eq!(ed.vim_mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn vim_o_open_line_below() {
+        let mut ed = vim_editor("hello\nworld");
+        ed.handle_key(key(KeyCode::Char('o')));
+        assert_eq!(ed.lines.len(), 3);
+        assert_eq!(ed.cursor_line, 1);
+        assert_eq!(ed.lines[1], "");
+        assert_eq!(ed.vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn vim_shift_o_open_line_above() {
+        let mut ed = vim_editor("hello\nworld");
+        ed.cursor_line = 1;
+        ed.handle_key(shift_key(KeyCode::Char('O')));
+        assert_eq!(ed.lines.len(), 3);
+        assert_eq!(ed.cursor_line, 1);
+        assert_eq!(ed.lines[1], "");
+        assert_eq!(ed.vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn vim_x_delete_char() {
+        let mut ed = vim_editor("hello");
+        ed.cursor_col = 1;
+        ed.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(ed.lines[0], "hllo");
+    }
+
+    #[test]
+    fn vim_shift_d_delete_to_end() {
+        let mut ed = vim_editor("hello world");
+        ed.cursor_col = 5;
+        ed.handle_key(shift_key(KeyCode::Char('D')));
+        assert_eq!(ed.lines[0], "hello");
+    }
+
+    #[test]
+    fn vim_dd_delete_line() {
+        let mut ed = vim_editor("line1\nline2\nline3");
+        ed.cursor_line = 1;
+        ed.handle_key(key(KeyCode::Char('d')));
+        ed.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(ed.lines, vec!["line1", "line3"]);
+    }
+
+    #[test]
+    fn vim_dd_last_line_clears() {
+        let mut ed = vim_editor("only line");
+        ed.handle_key(key(KeyCode::Char('d')));
+        ed.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(ed.lines, vec![""]);
+    }
+
+    #[test]
+    fn vim_dw_delete_word() {
+        let mut ed = vim_editor("hello world");
+        ed.cursor_col = 0;
+        ed.handle_key(key(KeyCode::Char('d')));
+        ed.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(ed.lines[0], "world");
+    }
+
+    #[test]
+    fn vim_d_dollar_delete_to_eol() {
+        let mut ed = vim_editor("hello world");
+        ed.cursor_col = 5;
+        ed.handle_key(key(KeyCode::Char('d')));
+        ed.handle_key(key(KeyCode::Char('$')));
+        assert_eq!(ed.lines[0], "hello");
+    }
+
+    #[test]
+    fn vim_gg_go_to_top() {
+        let mut ed = vim_editor("a\nb\nc");
+        ed.cursor_line = 2;
+        ed.handle_key(key(KeyCode::Char('g')));
+        ed.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(ed.cursor_line, 0);
+        assert_eq!(ed.cursor_col, 0);
+    }
+
+    #[test]
+    fn vim_shift_g_go_to_bottom() {
+        let mut ed = vim_editor("a\nb\nc");
+        ed.handle_key(shift_key(KeyCode::Char('G')));
+        assert_eq!(ed.cursor_line, 2);
+    }
+
+    #[test]
+    fn vim_0_go_to_start() {
+        let mut ed = vim_editor("hello");
+        ed.cursor_col = 3;
+        ed.handle_key(key(KeyCode::Char('0')));
+        assert_eq!(ed.cursor_col, 0);
+    }
+
+    #[test]
+    fn vim_dollar_go_to_end() {
+        let mut ed = vim_editor("hello");
+        ed.handle_key(key(KeyCode::Char('$')));
+        assert_eq!(ed.cursor_col, 4); // last char in normal mode
+    }
+
+    #[test]
+    fn vim_caret_first_non_whitespace() {
+        let mut ed = vim_editor("   hello");
+        ed.handle_key(key(KeyCode::Char('^')));
+        assert_eq!(ed.cursor_col, 3);
+    }
+
+    #[test]
+    fn vim_w_word_forward() {
+        let mut ed = vim_editor("hello world foo");
+        ed.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(ed.cursor_col, 6);
+    }
+
+    #[test]
+    fn vim_b_word_backward() {
+        let mut ed = vim_editor("hello world");
+        ed.cursor_col = 8;
+        ed.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(ed.cursor_col, 6);
+    }
+
+    #[test]
+    fn vim_e_word_end() {
+        let mut ed = vim_editor("hello world");
+        ed.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(ed.cursor_col, 4);
+    }
+
+    #[test]
+    fn vim_u_undo() {
+        let mut ed = vim_editor("hello");
+        ed.handle_key(key(KeyCode::Char('x'))); // delete 'h'
+        assert_eq!(ed.lines[0], "ello");
+        ed.handle_key(key(KeyCode::Char('u')));
+        assert_eq!(ed.lines[0], "hello");
+    }
+
+    #[test]
+    fn vim_q_exits() {
+        let mut ed = vim_editor("test");
+        assert_eq!(ed.handle_key(key(KeyCode::Char('q'))), EditorAction::ExitEditor);
+    }
+
+    #[test]
+    fn vim_esc_normal_exits() {
+        let mut ed = vim_editor("test");
+        assert_eq!(ed.handle_key(key(KeyCode::Esc)), EditorAction::ExitEditor);
+    }
+
+    // --- set_mode ---
+
+    #[test]
+    fn set_mode_to_vim_resets_to_normal() {
+        let mut ed = editor("test");
+        ed.set_mode(EditorMode::Vim);
+        assert_eq!(ed.mode, EditorMode::Vim);
+        assert_eq!(ed.vim_mode, VimMode::Normal);
+    }
+
+    // --- Word char detection ---
+
+    #[test]
+    fn word_char_classification() {
+        assert!(is_word_char('a'));
+        assert!(is_word_char('Z'));
+        assert!(is_word_char('0'));
+        assert!(is_word_char('_'));
+        assert!(!is_word_char(' '));
+        assert!(!is_word_char('.'));
+        assert!(!is_word_char('-'));
+    }
+
+    // --- UTF-8 handling ---
+
+    #[test]
+    fn insert_and_delete_multibyte() {
+        let mut ed = editor("");
+        for c in "café".chars() {
+            ed.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(ed.lines[0], "café");
+        assert_eq!(ed.cursor_col, 4);
+
+        ed.handle_key(key(KeyCode::Backspace));
+        assert_eq!(ed.lines[0], "caf");
+        assert_eq!(ed.cursor_col, 3);
+    }
+
+    #[test]
+    fn vim_x_on_multibyte() {
+        let mut ed = vim_editor("héllo");
+        ed.cursor_col = 1;
+        ed.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(ed.lines[0], "hllo");
+    }
+
+    // --- Render ---
+
+    #[test]
+    fn render_lines_non_editing() {
+        let ed = editor("hello\nworld");
+        let lines = ed.render_lines(false);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn render_lines_editing_shows_cursor() {
+        let ed = editor("hello");
+        let lines = ed.render_lines(true);
+        assert_eq!(lines.len(), 1);
+        // Should have 4 spans: gutter, before cursor, cursor char, after cursor
+        assert_eq!(lines[0].spans.len(), 4);
+    }
+
+    // --- Enter returns Enter action (not consumed) ---
+
+    #[test]
+    fn enter_returns_enter_action() {
+        let mut ed = editor("test");
+        assert_eq!(ed.handle_key(key(KeyCode::Enter)), EditorAction::Enter);
+    }
+}

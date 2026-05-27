@@ -309,4 +309,253 @@ mod tests {
         apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
         assert_eq!(body, Bytes::from("secret"));
     }
+
+    #[test]
+    fn response_rule_applies_to_response() {
+        let rules = make_rules(vec![Rule {
+            name: "test".into(),
+            enabled: true,
+            target: RuleTarget::Response,
+            scope: RuleScope::Body,
+            match_pattern: "secret".into(),
+            replacement: "REDACTED".into(),
+            is_regex: false,
+            compiled_regex: OnceLock::new(),
+        }]);
+
+        let mut headers = vec![];
+        let mut body = Bytes::from("the secret data");
+
+        apply_response_rules(&rules, &mut headers, &mut body);
+        assert_eq!(body, Bytes::from("the REDACTED data"));
+    }
+
+    #[test]
+    fn both_target_applies_to_request_and_response() {
+        let rules = make_rules(vec![Rule {
+            name: "test".into(),
+            enabled: true,
+            target: RuleTarget::Both,
+            scope: RuleScope::Body,
+            match_pattern: "token".into(),
+            replacement: "MASKED".into(),
+            is_regex: false,
+            compiled_regex: OnceLock::new(),
+        }]);
+
+        let mut uri = "/api".to_string();
+        let mut req_headers = vec![];
+        let mut req_body = Bytes::from("token=abc");
+        apply_request_rules(&rules, &mut uri, &mut req_headers, &mut req_body);
+        assert_eq!(req_body, Bytes::from("MASKED=abc"));
+
+        let mut resp_headers = vec![];
+        let mut resp_body = Bytes::from("your token is valid");
+        apply_response_rules(&rules, &mut resp_headers, &mut resp_body);
+        assert_eq!(resp_body, Bytes::from("your MASKED is valid"));
+    }
+
+    #[test]
+    fn scope_all_applies_everywhere() {
+        let rules = make_rules(vec![Rule {
+            name: "test".into(),
+            enabled: true,
+            target: RuleTarget::Request,
+            scope: RuleScope::All,
+            match_pattern: "foo".into(),
+            replacement: "bar".into(),
+            is_regex: false,
+            compiled_regex: OnceLock::new(),
+        }]);
+
+        let mut uri = "https://example.com/foo".to_string();
+        let mut headers = vec![("x-foo".into(), "foo-value".into())];
+        let mut body = Bytes::from("foo content");
+
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        assert_eq!(uri, "https://example.com/bar");
+        assert_eq!(headers[0].1, "bar-value");
+        assert_eq!(body, Bytes::from("bar content"));
+    }
+
+    #[test]
+    fn scope_url_only_touches_url() {
+        let rules = make_rules(vec![Rule {
+            name: "test".into(),
+            enabled: true,
+            target: RuleTarget::Request,
+            scope: RuleScope::Url,
+            match_pattern: "v1".into(),
+            replacement: "v2".into(),
+            is_regex: false,
+            compiled_regex: OnceLock::new(),
+        }]);
+
+        let mut uri = "/api/v1/users".to_string();
+        let mut headers = vec![("x-version".into(), "v1".into())];
+        let mut body = Bytes::from("version v1");
+
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        assert_eq!(uri, "/api/v2/users");
+        assert_eq!(headers[0].1, "v1");
+        assert_eq!(body, Bytes::from("version v1"));
+    }
+
+    #[test]
+    fn empty_pattern_is_noop() {
+        let rules = make_rules(vec![Rule {
+            name: "test".into(),
+            enabled: true,
+            target: RuleTarget::Both,
+            scope: RuleScope::All,
+            match_pattern: "".into(),
+            replacement: "something".into(),
+            is_regex: false,
+            compiled_regex: OnceLock::new(),
+        }]);
+
+        let mut uri = "/api".to_string();
+        let mut headers = vec![];
+        let mut body = Bytes::from("body");
+
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        assert_eq!(uri, "/api");
+        assert_eq!(body, Bytes::from("body"));
+    }
+
+    #[test]
+    fn invalid_regex_is_noop() {
+        let rules = make_rules(vec![Rule {
+            name: "test".into(),
+            enabled: true,
+            target: RuleTarget::Request,
+            scope: RuleScope::All,
+            match_pattern: "[invalid".into(),
+            replacement: "x".into(),
+            is_regex: true,
+            compiled_regex: OnceLock::new(),
+        }]);
+
+        let mut uri = "/api".to_string();
+        let mut headers = vec![];
+        let mut body = Bytes::from("body");
+
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        assert_eq!(body, Bytes::from("body"));
+    }
+
+    #[test]
+    fn regex_replace_all_occurrences() {
+        let rules = make_rules(vec![Rule {
+            name: "test".into(),
+            enabled: true,
+            target: RuleTarget::Request,
+            scope: RuleScope::Body,
+            match_pattern: r"\d+".into(),
+            replacement: "N".into(),
+            is_regex: true,
+            compiled_regex: OnceLock::new(),
+        }]);
+
+        let mut uri = "/api".to_string();
+        let mut headers = vec![];
+        let mut body = Bytes::from("id=123&count=456");
+
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        assert_eq!(body, Bytes::from("id=N&count=N"));
+    }
+
+    #[test]
+    fn rule_new_defaults() {
+        let rule = Rule::new("test rule".into());
+        assert!(rule.enabled);
+        assert_eq!(rule.target, RuleTarget::Both);
+        assert_eq!(rule.scope, RuleScope::All);
+        assert!(rule.match_pattern.is_empty());
+        assert!(!rule.is_regex);
+    }
+
+    #[test]
+    fn rule_target_cycle() {
+        assert_eq!(RuleTarget::Request.next(), RuleTarget::Response);
+        assert_eq!(RuleTarget::Response.next(), RuleTarget::Both);
+        assert_eq!(RuleTarget::Both.next(), RuleTarget::Request);
+    }
+
+    #[test]
+    fn rule_scope_cycle() {
+        assert_eq!(RuleScope::Url.next(), RuleScope::Headers);
+        assert_eq!(RuleScope::Headers.next(), RuleScope::Body);
+        assert_eq!(RuleScope::Body.next(), RuleScope::All);
+        assert_eq!(RuleScope::All.next(), RuleScope::Url);
+    }
+
+    #[test]
+    fn rule_target_labels() {
+        assert_eq!(RuleTarget::Request.label(), "Request");
+        assert_eq!(RuleTarget::Response.label(), "Response");
+        assert_eq!(RuleTarget::Both.label(), "Both");
+    }
+
+    #[test]
+    fn rule_scope_labels() {
+        assert_eq!(RuleScope::Url.label(), "URL");
+        assert_eq!(RuleScope::Headers.label(), "Headers");
+        assert_eq!(RuleScope::Body.label(), "Body");
+        assert_eq!(RuleScope::All.label(), "All");
+    }
+
+    #[test]
+    fn invalidate_regex_allows_recompile() {
+        let mut rule = Rule {
+            name: "test".into(),
+            enabled: true,
+            target: RuleTarget::Request,
+            scope: RuleScope::Body,
+            match_pattern: r"\d+".into(),
+            replacement: "N".into(),
+            is_regex: true,
+            compiled_regex: OnceLock::new(),
+        };
+
+        assert!(rule.get_compiled_regex().is_some());
+
+        rule.match_pattern = r"\w+".into();
+        rule.invalidate_regex();
+        let re = rule.get_compiled_regex().unwrap();
+        assert!(re.is_match("hello"));
+    }
+
+    #[test]
+    fn multiple_rules_apply_in_order() {
+        let rules = make_rules(vec![
+            Rule {
+                name: "first".into(),
+                enabled: true,
+                target: RuleTarget::Request,
+                scope: RuleScope::Body,
+                match_pattern: "aaa".into(),
+                replacement: "bbb".into(),
+                is_regex: false,
+                compiled_regex: OnceLock::new(),
+            },
+            Rule {
+                name: "second".into(),
+                enabled: true,
+                target: RuleTarget::Request,
+                scope: RuleScope::Body,
+                match_pattern: "bbb".into(),
+                replacement: "ccc".into(),
+                is_regex: false,
+                compiled_regex: OnceLock::new(),
+            },
+        ]);
+
+        let mut uri = "/api".to_string();
+        let mut headers = vec![];
+        let mut body = Bytes::from("aaa");
+
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        assert_eq!(body, Bytes::from("ccc"));
+    }
 }

@@ -13,7 +13,7 @@ use crate::channel::ProxyToUi;
 use crate::http::models::{RequestData, RequestId};
 use crate::proxy::intercept::InterceptDecision;
 use crate::proxy::tunnel;
-use crate::proxy::ProxyContext;
+use crate::proxy::{ProxyContext, TimingContext};
 use crate::rules;
 
 pub struct ProxyHandler {
@@ -65,7 +65,7 @@ impl ProxyHandler {
         req: Request<Incoming>,
     ) -> Result<Response<Full<Bytes>>, hyper::Error> {
         let request_id = RequestId::next();
-        let start = Instant::now();
+        let mut timing = TimingContext::new();
 
         let uri = req.uri().clone();
         let method = req.method().clone();
@@ -137,7 +137,10 @@ impl ProxyHandler {
         let addr = format!("{}:{}", upstream_host, upstream_port);
 
         let upstream = match TcpStream::connect(&addr).await {
-            Ok(s) => s,
+            Ok(s) => {
+                timing.tcp_connected = Some(Instant::now());
+                s
+            }
             Err(e) => {
                 warn!("Failed to connect to upstream {}: {}", addr, e);
                 let _ = self.ctx.ui_tx.send(ProxyToUi::RequestError(
@@ -163,7 +166,7 @@ impl ProxyHandler {
             parts.version,
             path_and_query,
             &request_data,
-            start,
+            timing,
             in_scope,
             &self.ctx,
         )

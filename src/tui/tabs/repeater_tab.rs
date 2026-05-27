@@ -7,7 +7,7 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::http::codec;
 use crate::http::sequence::StepState;
-use crate::tui::widgets::{body_view, diff_view, dim_style, format_size, key_style, logo};
+use crate::tui::widgets::{body_view, diff_view, dim_style, format_size, key_style, logo, timing_view};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
@@ -218,6 +218,12 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
+
+        if let Some(timing) = &resp.timing {
+            lines.push(Line::raw(""));
+            lines.extend(timing_view::timing_lines(timing, resp.duration));
+        }
+
         lines.push(Line::raw(""));
 
         lines.extend(crate::tui::widgets::header_lines(&resp.headers));
@@ -428,6 +434,11 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw("  "),
             Span::styled(format_size(resp.body.len()), Style::default().fg(Color::DarkGray)),
         ]));
+
+        if let Some(timing) = &resp.timing {
+            lines.push(Line::raw(""));
+            lines.extend(timing_view::timing_lines(timing, resp.duration));
+        }
 
         lines.extend(crate::tui::widgets::header_lines(&resp.headers));
 

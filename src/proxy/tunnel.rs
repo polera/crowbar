@@ -20,7 +20,7 @@ use tracing::{debug, error, warn};
 use crate::channel::ProxyToUi;
 use crate::http::models::{GrpcDirection, GrpcMessage, HttpVersion, RequestData, RequestId, ResponseData};
 use crate::proxy::intercept::InterceptDecision;
-use crate::proxy::ProxyContext;
+use crate::proxy::{ProxyContext, TimingContext};
 use crate::rules;
 use crate::tls::cert_gen;
 
@@ -248,6 +248,7 @@ async fn handle_websocket_upgrade(
         body: Bytes::new(),
         trailers: Vec::new(),
         duration: std::time::Duration::ZERO,
+        timing: None,
     };
     if in_scope {
         let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
@@ -301,7 +302,7 @@ async fn handle_http_request(
 ) -> Result<hyper::Response<Full<Bytes>>, hyper::Error> {
     let in_scope = ctx.scope.is_in_scope(host);
     let request_id = RequestId::next();
-    let start = Instant::now();
+    let mut timing = TimingContext::new();
 
     let method = req.method().clone();
     let version = req.version().into();
@@ -371,7 +372,10 @@ async fn handle_http_request(
 
     let addr = format!("{}:{}", host, port);
     let tcp = match TcpStream::connect(&addr).await {
-        Ok(s) => s,
+        Ok(s) => {
+            timing.tcp_connected = Some(Instant::now());
+            s
+        }
         Err(e) => {
             warn!("Failed to connect to upstream {}: {}", addr, e);
             let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
@@ -385,7 +389,10 @@ async fn handle_http_request(
     let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
     let tls_stream = match connector.connect(server_name, tcp).await {
-        Ok(s) => s,
+        Ok(s) => {
+            timing.tls_done = Some(Instant::now());
+            s
+        }
         Err(e) => {
             warn!("TLS handshake failed with {}: {}", addr, e);
             let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
@@ -408,7 +415,7 @@ async fn handle_http_request(
         parts.version,
         path_and_query,
         &request_data,
-        start,
+        timing,
         in_scope,
         ctx,
     )
@@ -634,7 +641,7 @@ async fn handle_h2_request(
 ) -> Result<hyper::Response<H2RespBody>, Infallible> {
     let in_scope = ctx.scope.is_in_scope(host);
     let request_id = RequestId::next();
-    let start = Instant::now();
+    let timing = TimingContext::new();
 
     let is_grpc = is_grpc_request(&req);
     let method = req.method().clone();
@@ -752,12 +759,12 @@ async fn handle_h2_request(
 
     if is_grpc {
         return Ok(build_grpc_response(
-            upstream_resp, resp_status, resp_headers, start, request_id, in_scope, ctx,
+            upstream_resp, resp_status, resp_headers, timing, request_id, in_scope, ctx,
         ));
     }
 
     build_buffered_response(
-        upstream_resp, resp_status, resp_headers, start, request_id, in_scope, ctx,
+        upstream_resp, resp_status, resp_headers, timing, request_id, in_scope, ctx,
     ).await
 }
 
@@ -765,12 +772,14 @@ fn build_grpc_response(
     upstream_resp: hyper::Response<Incoming>,
     resp_status: u16,
     resp_headers: Vec<(String, String)>,
-    start: Instant,
+    timing: TimingContext,
     request_id: RequestId,
     in_scope: bool,
     ctx: &ProxyContext,
 ) -> hyper::Response<H2RespBody> {
-    let duration = start.elapsed();
+    let duration = timing.start.elapsed();
+    let mut timing_data = timing.finish(None);
+    timing_data.time_to_first_byte = Some(duration);
 
     if in_scope {
         let response_data = ResponseData {
@@ -781,6 +790,7 @@ fn build_grpc_response(
             body: Bytes::new(),
             trailers: Vec::new(),
             duration,
+            timing: Some(timing_data),
         };
         let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
     }
@@ -806,12 +816,15 @@ async fn build_buffered_response(
     upstream_resp: hyper::Response<Incoming>,
     resp_status: u16,
     resp_headers: Vec<(String, String)>,
-    start: Instant,
+    mut timing: TimingContext,
     request_id: RequestId,
     in_scope: bool,
     ctx: &ProxyContext,
 ) -> Result<hyper::Response<H2RespBody>, Infallible> {
+    timing.first_byte = Some(Instant::now());
+
     let (_, resp_body_incoming) = upstream_resp.into_parts();
+    let body_start = Instant::now();
     let collected = match resp_body_incoming.collect().await {
         Ok(c) => c,
         Err(e) => {
@@ -823,15 +836,18 @@ async fn build_buffered_response(
             return Ok(h2_bad_gateway(&format!("Response body error: {}", e)));
         }
     };
+    let content_transfer = body_start.elapsed();
 
     let resp_trailers = collected.trailers().cloned();
     let mut resp_body = collected.to_bytes();
-    let duration = start.elapsed();
+    let duration = timing.start.elapsed();
 
     let trailer_pairs = crate::http::models::extract_trailers(resp_trailers.as_ref());
 
     let mut resp_headers_mut = resp_headers;
     rules::apply_response_rules(&ctx.rules, &mut resp_headers_mut, &mut resp_body);
+
+    let timing_data = timing.finish(Some(content_transfer));
 
     let response_data = ResponseData {
         status: resp_status,
@@ -841,6 +857,7 @@ async fn build_buffered_response(
         body: resp_body.clone(),
         trailers: trailer_pairs,
         duration,
+        timing: Some(timing_data),
     };
 
     if in_scope {
