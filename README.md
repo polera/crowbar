@@ -18,7 +18,7 @@
 
 # Crowbar
 
-A terminal-based web security testing proxy built in Rust. Intercept, inspect, and modify HTTP/HTTPS traffic through an interactive TUI — similar in spirit to Burp Suite or OWASP ZAP, but running entirely in your terminal.
+A terminal-based web security testing proxy built in Rust. Intercept, inspect, and modify HTTP/HTTPS traffic through an interactive TUI running entirely in your terminal.
 
 ## Features
 
