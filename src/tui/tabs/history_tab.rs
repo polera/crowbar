@@ -278,7 +278,14 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
         let content_type = req.headers.iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.as_str());
-        req_lines.extend(body_view::body_lines(&req.body, content_type, 100));
+        let proto_type = if req.is_grpc {
+            crate::http::proto_schema::request_type(&req.uri)
+        } else {
+            None
+        };
+        req_lines.extend(body_view::body_lines_with_schema(
+            &req.body, content_type, 100, proto_type.as_ref(),
+        ));
     }
 
     let req_paragraph = Paragraph::new(Text::from(req_lines))
@@ -356,7 +363,14 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
                 let content_type = resp.headers.iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.as_str());
-                resp_lines.extend(body_view::body_lines(&resp.body, content_type, 200));
+                let proto_type = if entry.request.is_grpc {
+                    crate::http::proto_schema::response_type(&entry.request.uri)
+                } else {
+                    None
+                };
+                resp_lines.extend(body_view::body_lines_with_schema(
+                    &resp.body, content_type, 200, proto_type.as_ref(),
+                ));
             }
 
             if !resp.trailers.is_empty() {
@@ -546,8 +560,47 @@ fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntr
         let size = format_size(msg.payload.len());
         let compressed_label = if msg.compressed { " [compressed]" } else { "" };
 
+        let proto_type = if entry.request.is_grpc {
+            match msg.direction {
+                GrpcDirection::ClientToServer => {
+                    crate::http::proto_schema::request_type(&entry.request.uri)
+                }
+                GrpcDirection::ServerToClient => {
+                    crate::http::proto_schema::response_type(&entry.request.uri)
+                }
+            }
+        } else {
+            None
+        };
+
         let preview = if msg.payload.is_empty() {
             "[empty]".to_string()
+        } else if let Some(text) = proto_type
+            .as_ref()
+            .and_then(|d| crate::http::proto_schema::decode_message_text(d, &msg.payload, 0))
+        {
+            // Compact preview from top-level (unindented) named fields.
+            let top: Vec<&String> = text.iter().filter(|l| !l.starts_with(' ')).collect();
+            let parts: Vec<String> = top
+                .iter()
+                .take(3)
+                .filter_map(|l| {
+                    let mut it = l.splitn(3, ' ');
+                    let _num = it.next()?;
+                    let name = it.next()?;
+                    let rest = it.next().unwrap_or("");
+                    let val = rest
+                        .split_once(": ")
+                        .map(|(_, v)| v)
+                        .unwrap_or_else(|| rest.trim_end_matches(':'));
+                    Some(format!("{}={}", name, val))
+                })
+                .collect();
+            let mut s = parts.join(", ");
+            if top.len() > 3 {
+                s.push_str(&format!(" (+{} more)", top.len() - 3));
+            }
+            s
         } else {
             use crate::http::protobuf::decode_raw;
             if let Some(fields) = decode_raw(&msg.payload) {

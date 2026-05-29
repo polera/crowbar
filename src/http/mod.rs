@@ -2,6 +2,7 @@ pub mod codec;
 pub mod export;
 pub mod import;
 pub mod models;
+pub mod proto_schema;
 pub mod protobuf;
 pub mod sequence;
 pub mod session;

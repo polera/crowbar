@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package sample.nested;
+
+// Lives in a subdirectory to exercise recursive .proto discovery.
+message Extra {
+  string note = 1;
+}

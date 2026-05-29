@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package importer;
+
+// Imports a type from a different root; only compiles when that root is on
+// the include path (exercises --proto-include).
+import "common/types.proto";
+
+message Wrapper {
+  common.Common c = 1;
+}

@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package sample;
+
+// Fixture schema for proto_schema unit tests. Exercises scalars, an enum,
+// a repeated field, a nested message, and a map.
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_ADMIN = 1;
+  ROLE_USER = 2;
+}
+
+message User {
+  int64 id = 1;
+  string name = 2;
+  Role role = 3;
+  repeated string tags = 4;
+  map<string, string> attributes = 5;
+}
+
+message Options {
+  bool verbose = 1;
+}
+
+// Exercises the full range of scalar wire types whose encoding the heuristic
+// decoder cannot get right without a schema (zigzag, fixed, float, bytes).
+message Scalars {
+  sint32 sint32_val = 1;
+  sint64 sint64_val = 2;
+  fixed32 fixed32_val = 3;
+  fixed64 fixed64_val = 4;
+  sfixed32 sfixed32_val = 5;
+  sfixed64 sfixed64_val = 6;
+  float float_val = 7;
+  double double_val = 8;
+  uint32 uint32_val = 9;
+  uint64 uint64_val = 10;
+  bytes bytes_val = 11;
+}
+
+message GetUserRequest {
+  int64 user_id = 1;
+  Options opts = 2;
+}
+
+service UserService {
+  rpc GetUser(GetUserRequest) returns (User);
+}

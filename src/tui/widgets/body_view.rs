@@ -3,26 +3,34 @@ use std::cell::RefCell;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
+use prost_reflect::MessageDescriptor;
+
 use crate::http::protobuf::{self, ProtoField, ProtoValue};
+use crate::http::proto_schema;
 use crate::tui::widgets::hex_view;
 
 thread_local! {
     static JSON_CACHE: RefCell<Option<(*const u8, usize, String)>> = const { RefCell::new(None) };
 }
 
-pub fn body_lines<'a>(
+/// Render a body to styled lines. For gRPC/protobuf bodies, `proto_type` (a
+/// message type resolved from a loaded `.proto` schema) enables named fields
+/// and accurate types; pass `None` to use the schema-agnostic heuristic
+/// decoder. `proto_type` is ignored for non-protobuf content.
+pub fn body_lines_with_schema<'a>(
     body: &[u8],
     content_type: Option<&str>,
     max_lines: usize,
+    proto_type: Option<&MessageDescriptor>,
 ) -> Vec<Line<'a>> {
     let ct = content_type.unwrap_or("");
 
     if ct.starts_with("application/grpc") {
-        return render_grpc(body, max_lines);
+        return render_grpc(body, max_lines, proto_type);
     }
 
     if ct.contains("protobuf") || ct.contains("x-protobuf") {
-        return render_protobuf(body, max_lines);
+        return render_protobuf(body, max_lines, proto_type);
     }
 
     let text = match std::str::from_utf8(body) {
@@ -259,7 +267,28 @@ fn render_multipart<'a>(text: &str, content_type: &str, max_lines: usize) -> Vec
     lines
 }
 
-fn render_grpc<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
+/// Split a gRPC body into frames, returning `(compressed, payload)` for each.
+fn grpc_frames(body: &[u8]) -> Vec<(bool, &[u8])> {
+    let mut frames = Vec::new();
+    let mut pos = 0;
+    while pos + 5 <= body.len() {
+        let compressed = body[pos] != 0;
+        let len = u32::from_be_bytes([body[pos + 1], body[pos + 2], body[pos + 3], body[pos + 4]])
+            as usize;
+        if pos + 5 + len > body.len() {
+            break;
+        }
+        frames.push((compressed, &body[pos + 5..pos + 5 + len]));
+        pos += 5 + len;
+    }
+    frames
+}
+
+fn render_grpc<'a>(
+    body: &[u8],
+    max_lines: usize,
+    proto_type: Option<&MessageDescriptor>,
+) -> Vec<Line<'a>> {
     if body.len() < 5 {
         return vec![Line::styled(
             format!("[gRPC: {} bytes, too small to decode]", body.len()),
@@ -267,9 +296,9 @@ fn render_grpc<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
         )];
     }
 
-    let messages = protobuf::decode_grpc_body(body);
+    let frames = grpc_frames(body);
 
-    if messages.is_empty() {
+    if frames.is_empty() {
         let mut lines = vec![Line::styled(
             format!("[gRPC: {} bytes, invalid frame]", body.len()),
             Style::default().fg(Color::DarkGray),
@@ -280,7 +309,7 @@ fn render_grpc<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
 
     let mut lines: Vec<Line<'a>> = Vec::new();
 
-    for (i, msg) in messages.iter().enumerate() {
+    for (i, (compressed, payload)) in frames.iter().enumerate() {
         if lines.len() >= max_lines {
             lines.push(Line::styled(
                 "... truncated",
@@ -289,23 +318,23 @@ fn render_grpc<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
             break;
         }
 
-        let label = if messages.len() == 1 {
+        let label = if frames.len() == 1 {
             format!(
                 "── gRPC message ({} bytes{}) ──",
-                msg.size,
-                if msg.compressed { ", compressed" } else { "" }
+                payload.len(),
+                if *compressed { ", compressed" } else { "" }
             )
         } else {
             format!(
                 "── gRPC message {} ({} bytes{}) ──",
                 i + 1,
-                msg.size,
-                if msg.compressed { ", compressed" } else { "" }
+                payload.len(),
+                if *compressed { ", compressed" } else { "" }
             )
         };
         lines.push(Line::styled(label, Style::default().fg(Color::DarkGray)));
 
-        if msg.compressed {
+        if *compressed {
             lines.push(Line::styled(
                 "  [compressed payload, cannot decode]",
                 Style::default().fg(Color::Yellow),
@@ -313,19 +342,56 @@ fn render_grpc<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
             continue;
         }
 
-        match &msg.fields {
-            Some(fields) => render_proto_fields(fields, 1, max_lines, &mut lines),
-            None => lines.push(Line::styled(
-                "  [could not decode protobuf]",
-                Style::default().fg(Color::Yellow),
-            )),
-        }
+        render_proto_payload(payload, proto_type, max_lines, &mut lines);
     }
 
     lines
 }
 
-fn render_protobuf<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
+/// Render a single bare protobuf payload, preferring schema decode and falling
+/// back to the heuristic decoder.
+fn render_proto_payload<'a>(
+    payload: &[u8],
+    proto_type: Option<&MessageDescriptor>,
+    max_lines: usize,
+    lines: &mut Vec<Line<'a>>,
+) {
+    if let Some(desc) = proto_type
+        && let Some(text) = proto_schema::decode_message_text(desc, payload, 0)
+    {
+        for line in text.into_iter().take(max_lines.saturating_sub(lines.len())) {
+            lines.push(render_named_line(&line));
+        }
+        return;
+    }
+
+    match protobuf::decode_raw(payload) {
+        Some(fields) => render_proto_fields(&fields, 1, max_lines, lines),
+        None => lines.push(Line::styled(
+            "  [could not decode protobuf]",
+            Style::default().fg(Color::Yellow),
+        )),
+    }
+}
+
+fn render_protobuf<'a>(
+    body: &[u8],
+    max_lines: usize,
+    proto_type: Option<&MessageDescriptor>,
+) -> Vec<Line<'a>> {
+    if let Some(desc) = proto_type
+        && let Some(text) = proto_schema::decode_message_text(desc, body, 0)
+    {
+        let mut lines = vec![Line::styled(
+            format!("[protobuf: {} bytes]", body.len()),
+            Style::default().fg(Color::DarkGray),
+        )];
+        for line in text.into_iter().take(max_lines) {
+            lines.push(render_named_line(&line));
+        }
+        return lines;
+    }
+
     match protobuf::decode_raw(body) {
         Some(fields) => {
             let mut lines = vec![Line::styled(
@@ -343,6 +409,60 @@ fn render_protobuf<'a>(body: &[u8], max_lines: usize) -> Vec<Line<'a>> {
             lines.extend(hex_view::hex_lines(body, 64));
             lines
         }
+    }
+}
+
+/// Style a single line of schema-decoded named text, e.g.
+/// `"  2 name str: alice"` or `"5 inner msg:"` or `"\"k\" => int: 1"`.
+fn render_named_line<'a>(line: &str) -> Line<'a> {
+    let indent_len = line.len() - line.trim_start().len();
+    let indent = &line[..indent_len];
+    let content = &line[indent_len..];
+
+    let mut spans = vec![Span::raw(indent.to_string())];
+
+    if let Some((head, value)) = content.split_once(": ") {
+        spans.extend(style_head(head));
+        spans.push(Span::styled(": ", Style::default().fg(Color::DarkGray)));
+        let tag = head.split_whitespace().last().unwrap_or("");
+        spans.push(Span::styled(value.to_string(), proto_value_style(tag)));
+    } else if let Some(head) = content.strip_suffix(':') {
+        // Header line for a nested message or map: no inline value.
+        spans.extend(style_head(head));
+        spans.push(Span::styled(":", Style::default().fg(Color::DarkGray)));
+    } else {
+        spans.push(Span::raw(content.to_string()));
+    }
+
+    Line::from(spans)
+}
+
+fn style_head<'a>(head: &str) -> Vec<Span<'a>> {
+    let toks: Vec<&str> = head.split_whitespace().collect();
+    let last = toks.len().saturating_sub(1);
+    let mut spans = Vec::with_capacity(toks.len() * 2);
+    for (i, tok) in toks.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let style = if i == 0 {
+            Style::default().fg(Color::Cyan) // field number or map key
+        } else if *tok == "=>" || i == last {
+            Style::default().fg(Color::DarkGray) // map arrow or type tag
+        } else {
+            Style::default().fg(Color::Yellow) // field name
+        };
+        spans.push(Span::styled(tok.to_string(), style));
+    }
+    spans
+}
+
+fn proto_value_style(tag: &str) -> Style {
+    match tag {
+        "str" => Style::default().fg(Color::Green),
+        "hex" => Style::default().fg(Color::Yellow),
+        "enum" | "bool" => Style::default().fg(Color::Blue),
+        _ => Style::default().fg(Color::Magenta),
     }
 }
 
@@ -475,4 +595,38 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 
 fn simple_url_decode(input: &str) -> String {
     crate::http::url_decode(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Concatenate a styled line's span contents back into plain text.
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn render_named_line_is_lossless() {
+        // Styling must not drop or reorder any characters, across a scalar
+        // field, a nested-message header, an indented child, and a map entry.
+        for input in [
+            "2 name str: alice",
+            "5 inner msg:",
+            "  1 verbose bool: true",
+            "\"env\" => str: prod",
+            "3 role enum: ROLE_ADMIN",
+        ] {
+            assert_eq!(line_text(&render_named_line(input)), input);
+        }
+    }
+
+    #[test]
+    fn render_named_line_colors_field_number() {
+        // The field number (first non-empty span, after the indent span) is cyan.
+        let line = render_named_line("2 name str: alice");
+        let num = line.spans.iter().find(|s| !s.content.is_empty()).unwrap();
+        assert_eq!(num.content.as_ref(), "2");
+        assert_eq!(num.style.fg, Some(Color::Cyan));
+    }
 }

@@ -55,6 +55,16 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting crowbar proxy on {}", config.bind);
 
+    if !config.proto_dir.is_empty() {
+        match crate::http::proto_schema::init(&config.proto_dir, &config.proto_include) {
+            Ok(count) => info!(
+                "Loaded {} protobuf message type(s) from {:?}",
+                count, config.proto_dir
+            ),
+            Err(e) => eprintln!("Warning: gRPC schema disabled: {e}"),
+        }
+    }
+
     let ca = CertificateAuthority::load_or_generate()?;
     let cert_cache = Arc::new(CertCache::new(Arc::new(ca)));
     let intercept = Arc::new(InterceptState::new(config.intercept));

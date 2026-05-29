@@ -29,7 +29,7 @@ A terminal-based web security testing proxy built in Rust. Intercept, inspect, a
 - **Macros / Sequences** — Build ordered sequences of requests from history, then execute them step-by-step with per-step status tracking
 - **Match & Replace Rules** — Modify requests, responses, or both automatically using regex or literal patterns across URL, headers, body, or all scopes; import and export rule sets as JSON
 - **WebSocket Support** — Intercept, relay, and display WebSocket text and binary frames with direction and timestamp tracking
-- **gRPC Inspection** — Automatic detection of `application/grpc` traffic with protobuf frame extraction, compressed-flag tracking, and per-message display in the history detail view
+- **gRPC Inspection** — Automatic detection of `application/grpc` traffic with protobuf frame extraction, compressed-flag tracking, and per-message display in the history detail view. Point Crowbar at your `.proto` files (`--proto-dir`) to decode messages with real field names, enum names, and accurate types — and edit/replay them in the Repeater with full re-encoding
 - **Scope Filtering** — Limit capture to specific hosts or wildcard domain patterns (e.g. `*.example.com`)
 - **Passive Scanning** — Flag common security issues: missing HSTS/CSP/X-Frame-Options/X-Content-Type-Options headers, server/X-Powered-By information disclosure, insecure cookie flags (Secure, HttpOnly, SameSite), 5xx errors, and stack trace detection (Java, Python, .NET, Go)
 - **Session Persistence** — Save (`Ctrl+S`) and load sessions to pick up where you left off; auto-generated timestamped session names; repeater macros are persisted with the session
@@ -91,6 +91,12 @@ crowbar --editor-mode vim
 # Limit to specific hosts
 crowbar --scope '*.example.com' --scope 'api.internal.dev'
 
+# Decode gRPC traffic against your .proto schema (repeat for multiple dirs)
+crowbar --proto-dir ./protos --proto-dir ./vendor/protos
+
+# Add extra import/include paths for protos that import across roots
+crowbar --proto-dir ./protos --proto-include ./third_party
+
 # Load a previous session
 crowbar --load ~/.crowbar/sessions/my-session.json
 
@@ -143,6 +149,8 @@ bind = "127.0.0.1:8080"
 intercept = false
 scope = ["*.example.com"]
 editor_mode = "default"  # or "vim"
+proto_dir = ["./protos"]         # .proto directories for gRPC decoding
+proto_include = ["./third_party"] # extra import/include paths
 ```
 
 CLI flags override config file values.

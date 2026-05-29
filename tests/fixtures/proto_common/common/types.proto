@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package common;
+
+// Lives in a separate include root, imported across directories.
+message Common {
+  string note = 1;
+}

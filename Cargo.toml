@@ -1,6 +1,6 @@
 [package]
 name = "crowbar"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "A TUI web security testing proxy"
 license = "MIT"
@@ -45,5 +45,11 @@ toml = "0.8"
 tokio-util = "0.7"
 regex = "1"
 similar = "2"
+
+# gRPC/protobuf schema support
+protox = "0.9"
+prost-reflect = "0.16"
+prost = "0.14"
+prost-types = "0.14"
 arboard = "3"
 parking_lot = "0.12"

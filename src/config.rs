@@ -28,6 +28,12 @@ struct Cli {
     #[arg(long, help = "Editor mode: 'default' or 'vim'")]
     pub editor_mode: Option<String>,
 
+    #[arg(long, help = "Directory of .proto files for gRPC decoding. Repeat for multiple.")]
+    pub proto_dir: Vec<PathBuf>,
+
+    #[arg(long, help = "Extra .proto import/include path. Repeat for multiple.")]
+    pub proto_include: Vec<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -64,6 +70,8 @@ struct FileConfig {
     intercept: Option<bool>,
     scope: Option<Vec<String>>,
     editor_mode: Option<EditorMode>,
+    proto_dir: Option<Vec<PathBuf>>,
+    proto_include: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug)]
@@ -74,6 +82,8 @@ pub struct Config {
     pub load: Option<PathBuf>,
     pub command: Option<Command>,
     pub editor_mode: EditorMode,
+    pub proto_dir: Vec<PathBuf>,
+    pub proto_include: Vec<PathBuf>,
 }
 
 impl Config {
@@ -138,6 +148,18 @@ impl Config {
             .or(file_config.editor_mode)
             .unwrap_or_default();
 
+        let proto_dir = if !cli.proto_dir.is_empty() {
+            cli.proto_dir
+        } else {
+            file_config.proto_dir.unwrap_or_default()
+        };
+
+        let proto_include = if !cli.proto_include.is_empty() {
+            cli.proto_include
+        } else {
+            file_config.proto_include.unwrap_or_default()
+        };
+
         Config {
             bind: cli.bind.or(file_bind).unwrap_or(default_bind),
             intercept: cli.intercept || file_config.intercept.unwrap_or(false),
@@ -145,6 +167,8 @@ impl Config {
             load: cli.load,
             command: cli.command,
             editor_mode,
+            proto_dir,
+            proto_include,
         }
     }
 }

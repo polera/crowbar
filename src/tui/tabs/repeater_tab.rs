@@ -233,7 +233,12 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
             let content_type = resp.headers.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 .map(|(_, v)| v.as_str());
-            lines.extend(body_view::body_lines(&resp.body, content_type, 500));
+            let proto_type = app.repeater.original.as_ref()
+                .filter(|r| r.is_grpc)
+                .and_then(|r| crate::http::proto_schema::response_type(&r.uri));
+            lines.extend(body_view::body_lines_with_schema(
+                &resp.body, content_type, 500, proto_type.as_ref(),
+            ));
         }
 
         if !resp.trailers.is_empty() {
@@ -447,7 +452,14 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
             let ct = resp.headers.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 .map(|(_, v)| v.as_str());
-            lines.extend(body_view::body_lines(&resp.body, ct, 100));
+            let proto_type = if step.request.is_grpc {
+                crate::http::proto_schema::response_type(&step.request.uri)
+            } else {
+                None
+            };
+            lines.extend(body_view::body_lines_with_schema(
+                &resp.body, ct, 100, proto_type.as_ref(),
+            ));
         }
 
         if !resp.trailers.is_empty() {
