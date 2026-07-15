@@ -42,7 +42,10 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
 }
 
-fn get_headers<'a>(headers: &'a [(String, String)], name: &'a str) -> impl Iterator<Item = &'a str> {
+fn get_headers<'a>(
+    headers: &'a [(String, String)],
+    name: &'a str,
+) -> impl Iterator<Item = &'a str> {
     headers
         .iter()
         .filter(move |(k, _)| k.eq_ignore_ascii_case(name))
@@ -105,11 +108,7 @@ fn check_info_disclosure(response: &ResponseData, findings: &mut Vec<Finding>) {
     }
 }
 
-fn check_cookie_flags(
-    request: &RequestData,
-    response: &ResponseData,
-    findings: &mut Vec<Finding>,
-) {
+fn check_cookie_flags(request: &RequestData, response: &ResponseData, findings: &mut Vec<Finding>) {
     for cookie in get_headers(&response.headers, "set-cookie") {
         let lower = cookie.to_ascii_lowercase();
 
@@ -189,9 +188,9 @@ fn truncate_cookie(cookie: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::models::{HttpVersion, RequestId};
     use bytes::Bytes;
     use std::time::{Duration, SystemTime};
-    use crate::http::models::{HttpVersion, RequestId};
 
     fn make_request(is_tls: bool) -> RequestData {
         RequestData {
@@ -213,7 +212,10 @@ mod tests {
             status: 200,
             reason: "OK".into(),
             version: HttpVersion::Http11,
-            headers: headers.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+            headers: headers
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
             body: Bytes::from(body.to_string()),
             trailers: Vec::new(),
             duration: Duration::from_millis(50),
@@ -226,7 +228,11 @@ mod tests {
         let req = make_request(true);
         let resp = make_response(vec![], "");
         let findings = scan_response(&req, &resp);
-        assert!(findings.iter().any(|f| f.title.contains("Strict-Transport-Security")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.title.contains("Strict-Transport-Security"))
+        );
     }
 
     #[test]
@@ -234,7 +240,11 @@ mod tests {
         let req = make_request(false);
         let resp = make_response(vec![], "");
         let findings = scan_response(&req, &resp);
-        assert!(!findings.iter().any(|f| f.title.contains("Strict-Transport-Security")));
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.title.contains("Strict-Transport-Security"))
+        );
     }
 
     #[test]
@@ -258,7 +268,10 @@ mod tests {
     #[test]
     fn stack_trace_detection() {
         let req = make_request(false);
-        let resp = make_response(vec![], "Error: Traceback (most recent call last):\n  File app.py");
+        let resp = make_response(
+            vec![],
+            "Error: Traceback (most recent call last):\n  File app.py",
+        );
         let findings = scan_response(&req, &resp);
         assert!(findings.iter().any(|f| f.severity == Severity::High));
     }
@@ -376,7 +389,11 @@ mod tests {
         let req = make_request(false);
         let resp = make_response(vec![], "");
         let findings = scan_response(&req, &resp);
-        assert!(findings.iter().any(|f| f.title.contains("Content-Security-Policy")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.title.contains("Content-Security-Policy"))
+        );
     }
 
     #[test]
@@ -392,7 +409,11 @@ mod tests {
         let req = make_request(false);
         let resp = make_response(vec![], "");
         let findings = scan_response(&req, &resp);
-        assert!(findings.iter().any(|f| f.title.contains("X-Content-Type-Options")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.title.contains("X-Content-Type-Options"))
+        );
     }
 
     #[test]
@@ -415,7 +436,10 @@ mod tests {
     fn cookie_with_all_flags_no_findings() {
         let req = make_request(true);
         let resp = make_response(
-            vec![("Set-Cookie", "id=abc; Secure; HttpOnly; SameSite=Strict; Path=/")],
+            vec![(
+                "Set-Cookie",
+                "id=abc; Secure; HttpOnly; SameSite=Strict; Path=/",
+            )],
             "",
         );
         let findings = scan_response(&req, &resp);

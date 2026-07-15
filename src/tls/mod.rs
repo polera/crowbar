@@ -23,6 +23,7 @@ pub fn build_tls_h2_client_config() -> Arc<rustls::ClientConfig> {
 }
 
 pub fn server_name_or_localhost(host: &str) -> rustls::pki_types::ServerName<'static> {
-    rustls::pki_types::ServerName::try_from(host.to_owned())
-        .unwrap_or_else(|_| rustls::pki_types::ServerName::try_from("localhost".to_owned()).unwrap())
+    rustls::pki_types::ServerName::try_from(host.to_owned()).unwrap_or_else(|_| {
+        rustls::pki_types::ServerName::try_from("localhost".to_owned()).unwrap()
+    })
 }

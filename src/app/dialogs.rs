@@ -65,29 +65,23 @@ impl App {
     }
 
     fn save_session_to(&mut self, path: &std::path::Path) {
-        if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            self.set_status(format!("Save failed: {}", e));
-            return;
-        }
-        let macro_requests: Vec<_> = self.macros.steps.iter().map(|s| s.request.clone()).collect();
-        let session = crate::http::session::Session::new(self.store.entries().to_vec(), macro_requests);
-        match std::fs::File::create(path) {
-            Ok(file) => {
-                let writer = std::io::BufWriter::new(file);
-                match serde_json::to_writer_pretty(writer, &session) {
-                    Ok(()) => {
-                        self.set_status(format!("Saved to {}", path.display()));
-                    }
-                    Err(e) => {
-                        self.set_status(format!("Save failed: {}", e));
-                    }
-                }
-            }
-            Err(e) => {
-                self.set_status(format!("Save failed: {}", e));
-            }
+        let macro_requests: Vec<_> = self
+            .macros
+            .steps
+            .iter()
+            .map(|s| s.request.clone())
+            .collect();
+        let session =
+            crate::http::session::Session::new(self.store.entries().to_vec(), macro_requests);
+        let result = crate::fs_security::write_private_with(path, |file| {
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::new(file);
+            serde_json::to_writer_pretty(&mut writer, &session).map_err(std::io::Error::other)?;
+            writer.flush()
+        });
+        match result {
+            Ok(()) => self.set_status(format!("Saved to {}", path.display())),
+            Err(e) => self.set_status(format!("Save failed: {}", e)),
         }
     }
 
@@ -100,7 +94,11 @@ impl App {
         let name = crate::rules::persist::auto_save_name();
         match crate::rules::persist::save(&rules, &name) {
             Ok(path) => {
-                self.set_status(format!("Exported {} rules to {}", rules.len(), path.display()));
+                self.set_status(format!(
+                    "Exported {} rules to {}",
+                    rules.len(),
+                    path.display()
+                ));
             }
             Err(e) => {
                 self.set_status(format!("Export failed: {}", e));
@@ -113,11 +111,7 @@ impl App {
             Ok(session) => {
                 self.store.load_entries(session.entries);
                 if let Some(saved) = session.macros {
-                    self.macros.steps = saved
-                        .steps
-                        .into_iter()
-                        .map(SequenceStep::new)
-                        .collect();
+                    self.macros.steps = saved.steps.into_iter().map(SequenceStep::new).collect();
                     self.macros.selected = 0;
                     self.macros.running = false;
                     self.macros.current_step = 0;

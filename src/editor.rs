@@ -49,7 +49,21 @@ pub struct TextEditor {
     pub mode: EditorMode,
     pub vim_mode: VimMode,
     pending_key: Option<char>,
-    undo_stack: std::collections::VecDeque<(Vec<String>, usize, usize)>,
+    undo_stack: std::collections::VecDeque<UndoEntry>,
+}
+
+enum UndoEntry {
+    Full {
+        lines: Vec<String>,
+        cursor_line: usize,
+        cursor_col: usize,
+    },
+    Line {
+        index: usize,
+        content: String,
+        cursor_line: usize,
+        cursor_col: usize,
+    },
 }
 
 impl TextEditor {
@@ -135,10 +149,7 @@ impl TextEditor {
 
         let mut result = Vec::with_capacity(self.lines.len());
         for (i, line) in self.lines.iter().enumerate() {
-            let num_span = Span::styled(
-                format!("{:>width$} ", i + 1, width = gw),
-                num_style,
-            );
+            let num_span = Span::styled(format!("{:>width$} ", i + 1, width = gw), num_style);
 
             if editing && i == self.cursor_line {
                 let char_count = line.chars().count();
@@ -147,7 +158,11 @@ impl TextEditor {
                 let col_byte = indices.nth(col).map(|(i, _)| i).unwrap_or(line.len());
                 let before = &line[..col_byte];
                 let (cursor_char, after) = if col < char_count {
-                    let next_byte = line[col_byte..].chars().next().map(|c| col_byte + c.len_utf8()).unwrap_or(line.len());
+                    let next_byte = line[col_byte..]
+                        .chars()
+                        .next()
+                        .map(|c| col_byte + c.len_utf8())
+                        .unwrap_or(line.len());
                     (&line[col_byte..next_byte], &line[next_byte..])
                 } else {
                     (" ", "")
@@ -162,10 +177,7 @@ impl TextEditor {
                     Span::raw(after),
                 ]));
             } else {
-                result.push(Line::from(vec![
-                    num_span,
-                    Span::raw(line.as_str()),
-                ]));
+                result.push(Line::from(vec![num_span, Span::raw(line.as_str())]));
             }
         }
         result
@@ -198,7 +210,7 @@ impl TextEditor {
         match (key.modifiers, key.code) {
             (_, KeyCode::Enter) => EditorAction::Enter,
             (_, KeyCode::Char(c)) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.save_undo();
+                self.save_line_undo();
                 let col = self.cursor_col.min(self.current_line_len());
                 let byte_col = self.char_to_byte(col);
                 self.lines[self.cursor_line].insert(byte_col, c);
@@ -354,7 +366,7 @@ impl TextEditor {
 
             // Deletion
             (_, KeyCode::Char('x')) => {
-                self.save_undo();
+                self.save_line_undo();
                 let len = self.current_line_len();
                 if len > 0 && self.cursor_col < len {
                     let byte_col = self.char_to_byte(self.cursor_col);
@@ -369,7 +381,7 @@ impl TextEditor {
                 EditorAction::Consumed
             }
             (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
-                self.save_undo();
+                self.save_line_undo();
                 let col = self.cursor_col.min(self.current_line_len());
                 let byte_col = self.char_to_byte(col);
                 self.lines[self.cursor_line].truncate(byte_col);
@@ -411,13 +423,14 @@ impl TextEditor {
         match (pending, key.code) {
             // dd - delete line
             ('d', KeyCode::Char('d')) => {
-                self.save_undo();
                 if self.lines.len() > 1 {
+                    self.save_undo();
                     self.lines.remove(self.cursor_line);
                     if self.cursor_line >= self.lines.len() {
                         self.cursor_line = self.lines.len().saturating_sub(1);
                     }
                 } else {
+                    self.save_line_undo();
                     self.lines[0].clear();
                 }
                 self.clamp_cursor_normal();
@@ -425,14 +438,14 @@ impl TextEditor {
             }
             // dw - delete word
             ('d', KeyCode::Char('w')) => {
-                self.save_undo();
+                self.save_line_undo();
                 self.delete_word_forward();
                 self.clamp_cursor_normal();
                 EditorAction::Consumed
             }
             // d$ - delete to end of line
             ('d', KeyCode::Char('$')) => {
-                self.save_undo();
+                self.save_line_undo();
                 let col = self.cursor_col.min(self.current_line_len());
                 let byte_col = self.char_to_byte(col);
                 self.lines[self.cursor_line].truncate(byte_col);
@@ -454,7 +467,7 @@ impl TextEditor {
 
     fn handle_backspace(&mut self) {
         if self.cursor_col > 0 && self.cursor_line < self.lines.len() {
-            self.save_undo();
+            self.save_line_undo();
             self.cursor_col -= 1;
             let byte_col = self.char_to_byte(self.cursor_col);
             let next_byte = self.lines[self.cursor_line][byte_col..]
@@ -478,7 +491,7 @@ impl TextEditor {
         }
         let line_len = self.current_line_len();
         if self.cursor_col < line_len {
-            self.save_undo();
+            self.save_line_undo();
             let byte_col = self.char_to_byte(self.cursor_col);
             let next_byte = self.lines[self.cursor_line][byte_col..]
                 .chars()
@@ -551,27 +564,31 @@ impl TextEditor {
     // --- Word motion ---
 
     fn word_forward(&mut self) {
-        let line: Vec<char> = self.lines[self.cursor_line].chars().collect();
+        let line = &self.lines[self.cursor_line];
+        let line_len = line.chars().count();
         let mut col = self.cursor_col;
+        let mut chars = line.chars().skip(col).peekable();
 
-        if col < line.len() {
-            let start_is_word = is_word_char(line[col]);
-            while col < line.len()
-                && is_word_char(line[col]) == start_is_word
-                && !line[col].is_whitespace()
+        if let Some(&first) = chars.peek() {
+            let start_is_word = is_word_char(first);
+            while chars
+                .next_if(|ch| is_word_char(*ch) == start_is_word && !ch.is_whitespace())
+                .is_some()
             {
                 col += 1;
             }
-            while col < line.len() && line[col].is_whitespace() {
+            while chars.next_if(|ch| ch.is_whitespace()).is_some() {
                 col += 1;
             }
         }
 
-        if col >= line.len() && self.cursor_line + 1 < self.lines.len() {
+        if col >= line_len && self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
-            let next_line: Vec<char> = self.lines[self.cursor_line].chars().collect();
             col = 0;
-            while col < next_line.len() && next_line[col].is_whitespace() {
+            for ch in self.lines[self.cursor_line].chars() {
+                if !ch.is_whitespace() {
+                    break;
+                }
                 col += 1;
             }
         }
@@ -580,56 +597,38 @@ impl TextEditor {
     }
 
     fn word_backward(&mut self) {
-        let line: Vec<char> = self.lines[self.cursor_line].chars().collect();
         let mut col = self.cursor_col;
 
         if col == 0 {
             if self.cursor_line > 0 {
                 self.cursor_line -= 1;
-                let prev_line: Vec<char> = self.lines[self.cursor_line].chars().collect();
-                col = prev_line.len();
-                while col > 0 && prev_line[col - 1].is_whitespace() {
-                    col -= 1;
-                }
-                if col > 0 {
-                    let is_word = is_word_char(prev_line[col - 1]);
-                    while col > 0 && is_word_char(prev_line[col - 1]) == is_word && !prev_line[col - 1].is_whitespace() {
-                        col -= 1;
-                    }
-                }
+                col = self.lines[self.cursor_line].chars().count();
+                col = word_start_before(&self.lines[self.cursor_line], col);
             }
             self.cursor_col = col;
             return;
         }
 
-        while col > 0 && line[col - 1].is_whitespace() {
-            col -= 1;
-        }
-        if col > 0 {
-            let is_word = is_word_char(line[col - 1]);
-            while col > 0 && is_word_char(line[col - 1]) == is_word && !line[col - 1].is_whitespace() {
-                col -= 1;
-            }
-        }
-
-        self.cursor_col = col;
+        self.cursor_col = word_start_before(&self.lines[self.cursor_line], col);
     }
 
     fn word_end(&mut self) {
-        let line: Vec<char> = self.lines[self.cursor_line].chars().collect();
+        let line = &self.lines[self.cursor_line];
+        let line_len = line.chars().count();
         let mut col = self.cursor_col;
 
-        if col + 1 < line.len() {
+        if col + 1 < line_len {
             col += 1;
         }
-        while col < line.len() && line[col].is_whitespace() {
+        let mut chars = line.chars().skip(col).peekable();
+        while chars.next_if(|ch| ch.is_whitespace()).is_some() {
             col += 1;
         }
-        if col < line.len() {
-            let is_word = is_word_char(line[col]);
-            while col + 1 < line.len()
-                && is_word_char(line[col + 1]) == is_word
-                && !line[col + 1].is_whitespace()
+        if let Some(first) = chars.next() {
+            let is_word = is_word_char(first);
+            while chars
+                .next_if(|ch| is_word_char(*ch) == is_word && !ch.is_whitespace())
+                .is_some()
             {
                 col += 1;
             }
@@ -639,19 +638,19 @@ impl TextEditor {
     }
 
     fn delete_word_forward(&mut self) {
-        let line: Vec<char> = self.lines[self.cursor_line].chars().collect();
         let start = self.cursor_col;
         let mut end = start;
+        let mut chars = self.lines[self.cursor_line].chars().skip(start).peekable();
 
-        if end < line.len() {
-            let start_is_word = is_word_char(line[end]);
-            while end < line.len()
-                && is_word_char(line[end]) == start_is_word
-                && !line[end].is_whitespace()
+        if let Some(&first) = chars.peek() {
+            let start_is_word = is_word_char(first);
+            while chars
+                .next_if(|ch| is_word_char(*ch) == start_is_word && !ch.is_whitespace())
+                .is_some()
             {
                 end += 1;
             }
-            while end < line.len() && line[end].is_whitespace() {
+            while chars.next_if(|ch| ch.is_whitespace()).is_some() {
                 end += 1;
             }
         }
@@ -666,27 +665,80 @@ impl TextEditor {
     // --- Undo ---
 
     fn save_undo(&mut self) {
+        self.push_undo(UndoEntry::Full {
+            lines: self.lines.clone(),
+            cursor_line: self.cursor_line,
+            cursor_col: self.cursor_col,
+        });
+    }
+
+    fn save_line_undo(&mut self) {
+        self.push_undo(UndoEntry::Line {
+            index: self.cursor_line,
+            content: self.lines[self.cursor_line].clone(),
+            cursor_line: self.cursor_line,
+            cursor_col: self.cursor_col,
+        });
+    }
+
+    fn push_undo(&mut self, entry: UndoEntry) {
         if self.undo_stack.len() >= 100 {
             self.undo_stack.pop_front();
         }
-        self.undo_stack.push_back((
-            self.lines.clone(),
-            self.cursor_line,
-            self.cursor_col,
-        ));
+        self.undo_stack.push_back(entry);
     }
 
     fn undo(&mut self) {
-        if let Some((lines, line, col)) = self.undo_stack.pop_back() {
-            self.lines = lines;
-            self.cursor_line = line;
-            self.cursor_col = col;
+        match self.undo_stack.pop_back() {
+            Some(UndoEntry::Full {
+                lines,
+                cursor_line,
+                cursor_col,
+            }) => {
+                self.lines = lines;
+                self.cursor_line = cursor_line;
+                self.cursor_col = cursor_col;
+            }
+            Some(UndoEntry::Line {
+                index,
+                content,
+                cursor_line,
+                cursor_col,
+            }) => {
+                self.lines[index] = content;
+                self.cursor_line = cursor_line;
+                self.cursor_col = cursor_col;
+            }
+            None => {}
         }
     }
 }
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+fn word_start_before(line: &str, col: usize) -> usize {
+    let byte_col = line
+        .char_indices()
+        .nth(col)
+        .map_or(line.len(), |(index, _)| index);
+    let mut chars = line[..byte_col].chars().rev().peekable();
+    let mut col = col;
+
+    while chars.next_if(|ch| ch.is_whitespace()).is_some() {
+        col -= 1;
+    }
+    if let Some(&last) = chars.peek() {
+        let is_word = is_word_char(last);
+        while chars
+            .next_if(|ch| is_word_char(*ch) == is_word && !ch.is_whitespace())
+            .is_some()
+        {
+            col -= 1;
+        }
+    }
+    col
 }
 
 #[cfg(test)]
@@ -708,12 +760,26 @@ mod tests {
 
     fn editor(text: &str) -> TextEditor {
         let lines: Vec<String> = text.lines().map(String::from).collect();
-        TextEditor::new(if lines.is_empty() { vec![String::new()] } else { lines }, EditorMode::Default)
+        TextEditor::new(
+            if lines.is_empty() {
+                vec![String::new()]
+            } else {
+                lines
+            },
+            EditorMode::Default,
+        )
     }
 
     fn vim_editor(text: &str) -> TextEditor {
         let lines: Vec<String> = text.lines().map(String::from).collect();
-        TextEditor::new(if lines.is_empty() { vec![String::new()] } else { lines }, EditorMode::Vim)
+        TextEditor::new(
+            if lines.is_empty() {
+                vec![String::new()]
+            } else {
+                lines
+            },
+            EditorMode::Vim,
+        )
     }
 
     // --- Constructor / basic state ---
@@ -922,7 +988,10 @@ mod tests {
     #[test]
     fn ctrl_enter() {
         let mut ed = editor("test");
-        assert_eq!(ed.handle_key(ctrl_key(KeyCode::Enter)), EditorAction::CtrlEnter);
+        assert_eq!(
+            ed.handle_key(ctrl_key(KeyCode::Enter)),
+            EditorAction::CtrlEnter
+        );
     }
 
     // --- Gutter width ---
@@ -957,6 +1026,26 @@ mod tests {
         ed2.handle_key(key(KeyCode::Char('!')));
         ed2.undo();
         assert_eq!(ed2.lines[0], "hello!");
+    }
+
+    #[test]
+    fn undo_line_edit_preserves_other_lines() {
+        let mut ed = editor("first\nsecond");
+        ed.cursor_line = 1;
+        ed.cursor_col = 6;
+        ed.handle_key(key(KeyCode::Char('!')));
+        ed.undo();
+        assert_eq!(ed.lines, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn undo_restores_structural_edit() {
+        let mut ed = editor("hello world");
+        ed.cursor_col = 5;
+        ed.insert_newline();
+        ed.undo();
+        assert_eq!(ed.lines, vec!["hello world"]);
+        assert_eq!((ed.cursor_line, ed.cursor_col), (0, 5));
     }
 
     // --- Vim normal mode ---
@@ -1154,6 +1243,17 @@ mod tests {
     }
 
     #[test]
+    fn vim_word_motions_preserve_character_columns() {
+        let mut ed = vim_editor("héllo 世界");
+        ed.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(ed.cursor_col, 6);
+        ed.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(ed.cursor_col, 7);
+        ed.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(ed.cursor_col, 6);
+    }
+
+    #[test]
     fn vim_u_undo() {
         let mut ed = vim_editor("hello");
         ed.handle_key(key(KeyCode::Char('x'))); // delete 'h'
@@ -1165,7 +1265,10 @@ mod tests {
     #[test]
     fn vim_q_exits() {
         let mut ed = vim_editor("test");
-        assert_eq!(ed.handle_key(key(KeyCode::Char('q'))), EditorAction::ExitEditor);
+        assert_eq!(
+            ed.handle_key(key(KeyCode::Char('q'))),
+            EditorAction::ExitEditor
+        );
     }
 
     #[test]

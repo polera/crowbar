@@ -1,37 +1,29 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::App;
 use crate::http::codec;
 use crate::http::sequence::StepState;
-use crate::tui::widgets::{body_view, diff_view, dim_style, format_size, key_style, logo, timing_view};
+use crate::tui::widgets::{
+    body_view, diff_view, dim_style, format_size, key_style, logo, timing_view,
+};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(3),
-    ])
-    .split(area);
+    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
 
     if app.macros.show {
-        let panes = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
-        .split(chunks[0]);
+        let panes = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[0]);
 
         render_macro_list(app, frame, panes[0]);
         render_macro_detail(app, frame, panes[1]);
         render_macro_actions(app, frame, chunks[1]);
     } else {
-        let panes = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
-        .split(chunks[0]);
+        let panes = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[0]);
 
         render_request_editor(app, frame, panes[0]);
         render_response(app, frame, panes[1]);
@@ -43,9 +35,7 @@ fn render_request_editor(app: &App, frame: &mut Frame, area: Rect) {
     let has_content = app.repeater.editor.has_content();
 
     if !has_content {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Request ");
+        let block = Block::default().borders(Borders::ALL).title(" Request ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
         logo::render(frame, inner);
@@ -68,16 +58,19 @@ fn render_request_editor(app: &App, frame: &mut Frame, area: Rect) {
     let num_style = Style::default().fg(Color::DarkGray);
 
     for (i, line) in app.repeater.editor.lines.iter().enumerate() {
-        let num_span = Span::styled(
-            format!("{:>width$} ", i + 1, width = gw),
-            num_style,
-        );
+        let num_span = Span::styled(format!("{:>width$} ", i + 1, width = gw), num_style);
 
         if app.repeater.editing && i == app.repeater.editor.cursor_line {
-            let char_indices: Vec<(usize, char)> = line.char_indices().collect();
-            let col = app.repeater.editor.cursor_col.min(char_indices.len());
-            let byte_start = char_indices.get(col).map_or(line.len(), |&(i, _)| i);
-            let byte_end = char_indices.get(col + 1).map_or(line.len(), |&(i, _)| i);
+            let char_count = line.chars().count();
+            let col = app.repeater.editor.cursor_col.min(char_count);
+            let byte_start = line
+                .char_indices()
+                .nth(col)
+                .map_or(line.len(), |(index, _)| index);
+            let byte_end = line[byte_start..]
+                .chars()
+                .next()
+                .map_or(line.len(), |ch| byte_start + ch.len_utf8());
             let before = &line[..byte_start];
             let cursor_char = if byte_start < line.len() {
                 &line[byte_start..byte_end]
@@ -96,27 +89,26 @@ fn render_request_editor(app: &App, frame: &mut Frame, area: Rect) {
                 Span::raw(after),
             ]));
         } else if i == 0 {
-                let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                if parts.len() >= 2 {
-                    lines.push(Line::from(vec![
-                        num_span,
-                        Span::styled(parts[0], Style::default().fg(Color::Green).bold()),
-                        Span::raw(" "),
-                        Span::raw(parts[1..].join(" ")),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![num_span, Span::raw(line.as_str())]));
-                }
-            } else if let Some((key, value)) = line.split_once(':') {
+            if let Some((method, rest)) = line.split_once(' ') {
                 lines.push(Line::from(vec![
                     num_span,
-                    Span::styled(key, Style::default().fg(Color::Cyan)),
-                    Span::raw(":"),
-                    Span::raw(value),
+                    Span::styled(method, Style::default().fg(Color::Green).bold()),
+                    Span::raw(" "),
+                    Span::raw(rest),
                 ]));
             } else {
                 lines.push(Line::from(vec![num_span, Span::raw(line.as_str())]));
             }
+        } else if let Some((key, value)) = line.split_once(':') {
+            lines.push(Line::from(vec![
+                num_span,
+                Span::styled(key, Style::default().fg(Color::Cyan)),
+                Span::raw(":"),
+                Span::raw(value),
+            ]));
+        } else {
+            lines.push(Line::from(vec![num_span, Span::raw(line.as_str())]));
+        }
     }
 
     let title = if app.repeater.editing {
@@ -167,11 +159,7 @@ fn render_diff(app: &App, frame: &mut Frame, area: Rect) {
 fn render_response(app: &App, frame: &mut Frame, area: Rect) {
     if app.repeater.pending {
         let msg = Paragraph::new("Sending request...")
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Response "),
-            )
+            .block(Block::default().borders(Borders::ALL).title(" Response "))
             .style(Style::default().fg(Color::Yellow));
         frame.render_widget(msg, area);
         return;
@@ -179,11 +167,7 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
 
     if let Some(ref error) = app.repeater.error {
         let msg = Paragraph::new(format!("Error: {}", error))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Response "),
-            )
+            .block(Block::default().borders(Borders::ALL).title(" Response "))
             .style(Style::default().fg(Color::Red))
             .wrap(Wrap { trim: false });
         frame.render_widget(msg, area);
@@ -202,7 +186,10 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
         };
 
         lines.push(Line::from(vec![
-            Span::styled(resp.version.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                resp.version.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw(" "),
             Span::styled(resp.status.to_string(), status_style),
             Span::raw(" "),
@@ -230,14 +217,22 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
 
         if !resp.body.is_empty() {
             lines.push(Line::raw(""));
-            let content_type = resp.headers.iter()
+            let content_type = resp
+                .headers
+                .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 .map(|(_, v)| v.as_str());
-            let proto_type = app.repeater.original.as_ref()
+            let proto_type = app
+                .repeater
+                .original
+                .as_ref()
                 .filter(|r| r.is_grpc)
                 .and_then(|r| crate::http::proto_schema::response_type(&r.uri));
             lines.extend(body_view::body_lines_with_schema(
-                &resp.body, content_type, 500, proto_type.as_ref(),
+                &resp.body,
+                content_type,
+                500,
+                proto_type.as_ref(),
             ));
         }
 
@@ -254,11 +249,7 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let widget = Paragraph::new(content)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Response "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Response "))
         .wrap(Wrap { trim: false })
         .scroll((app.repeater.resp_scroll, 0));
 
@@ -278,7 +269,11 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw("navigate"),
         ])
     } else {
-        let diff_label = if app.repeater.show_diff { "d:raw" } else { "d:diff" };
+        let diff_label = if app.repeater.show_diff {
+            "d:raw"
+        } else {
+            "d:diff"
+        };
         Line::from(vec![
             if has_request {
                 Span::styled(" Ctrl+Enter ", key_style())
@@ -307,11 +302,8 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
         ])
     };
 
-    let widget = Paragraph::new(actions).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Actions "),
-    );
+    let widget =
+        Paragraph::new(actions).block(Block::default().borders(Borders::ALL).title(" Actions "));
     frame.render_widget(widget, area);
 }
 
@@ -368,13 +360,19 @@ fn render_macro_list(app: &App, frame: &mut Frame, area: Rect) {
             step.request.uri.clone()
         };
 
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:>2}. ", i + 1), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("[{}] ", state_icon), state_style),
-            Span::styled(format!("{:<7}", step.request.method), method_style),
-            Span::raw(format!("{:<36} ", path)),
-            Span::raw(status_str),
-        ]).style(row_style));
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    format!(" {:>2}. ", i + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("[{}] ", state_icon), state_style),
+                Span::styled(format!("{:<7}", step.request.method), method_style),
+                Span::raw(format!("{:<36} ", path)),
+                Span::raw(status_str),
+            ])
+            .style(row_style),
+        );
     }
 
     let title = if app.macros.running {
@@ -409,7 +407,11 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
                 "Select a step to view details",
                 Style::default().fg(Color::DarkGray),
             ))
-            .block(Block::default().borders(Borders::ALL).title(" Step Detail "));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Step Detail "),
+            );
             frame.render_widget(widget, area);
             return;
         }
@@ -418,7 +420,10 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     lines.push(Line::from(vec![
-        Span::styled(&step.request.method, Style::default().fg(Color::Green).bold()),
+        Span::styled(
+            &step.request.method,
+            Style::default().fg(Color::Green).bold(),
+        ),
         Span::raw(" "),
         Span::raw(&step.request.uri),
     ]));
@@ -435,9 +440,15 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(format!("{} {}", resp.status, resp.reason), status_style),
             Span::raw("  "),
-            Span::styled(format!("{:.0?}", resp.duration), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.0?}", resp.duration),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw("  "),
-            Span::styled(format_size(resp.body.len()), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format_size(resp.body.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
 
         if let Some(timing) = &resp.timing {
@@ -449,7 +460,9 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
 
         if !resp.body.is_empty() {
             lines.push(Line::raw(""));
-            let ct = resp.headers.iter()
+            let ct = resp
+                .headers
+                .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 .map(|(_, v)| v.as_str());
             let proto_type = if step.request.is_grpc {
@@ -458,7 +471,10 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
                 None
             };
             lines.extend(body_view::body_lines_with_schema(
-                &resp.body, ct, 100, proto_type.as_ref(),
+                &resp.body,
+                ct,
+                100,
+                proto_type.as_ref(),
             ));
         }
 
@@ -474,7 +490,11 @@ fn render_macro_detail(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     let widget = Paragraph::new(Text::from(lines))
-        .block(Block::default().borders(Borders::ALL).title(" Step Detail "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Step Detail "),
+        )
         .wrap(Wrap { trim: false })
         .scroll((app.repeater.resp_scroll, 0));
 

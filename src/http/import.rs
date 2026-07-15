@@ -15,13 +15,14 @@ pub fn load_file(path: &Path) -> anyhow::Result<super::session::Session> {
 
     match ext.as_str() {
         "har" => load_har(path).map(|entries| super::session::Session::new(entries, Vec::new())),
-        "json" => {
-            match super::session::load(path) {
-                Ok(session) => Ok(session),
-                Err(session_err) => load_har(path).map(|entries| super::session::Session::new(entries, Vec::new()))
-                    .map_err(|har_err| anyhow::anyhow!("Failed as session ({session_err}) and as HAR ({har_err})")),
-            }
-        }
+        "json" => match super::session::load(path) {
+            Ok(session) => Ok(session),
+            Err(session_err) => load_har(path)
+                .map(|entries| super::session::Session::new(entries, Vec::new()))
+                .map_err(|har_err| {
+                    anyhow::anyhow!("Failed as session ({session_err}) and as HAR ({har_err})")
+                }),
+        },
         _ => super::session::load(path),
     }
 }
@@ -30,12 +31,7 @@ fn load_har(path: &Path) -> anyhow::Result<Vec<HistoryEntry>> {
     let content = std::fs::read_to_string(path)?;
     let har: HarFile = serde_json::from_str(&content)?;
 
-    let entries = har
-        .log
-        .entries
-        .into_iter()
-        .map(convert_har_entry)
-        .collect();
+    let entries = har.log.entries.into_iter().map(convert_har_entry).collect();
 
     Ok(entries)
 }
@@ -60,8 +56,7 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         .map(|pd| Bytes::from(pd.text.clone().unwrap_or_default()))
         .unwrap_or_default();
 
-    let timestamp = parse_iso_timestamp(&entry.started_date_time)
-        .unwrap_or(SystemTime::now());
+    let timestamp = parse_iso_timestamp(&entry.started_date_time).unwrap_or(SystemTime::now());
 
     let request_data = RequestData {
         id: RequestId::next(),
@@ -118,9 +113,7 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
 fn extract_host(url: &str) -> String {
     if let Some(pos) = url.find("://") {
         let after_scheme = &url[pos + 3..];
-        let end = after_scheme
-            .find('/')
-            .unwrap_or(after_scheme.len());
+        let end = after_scheme.find('/').unwrap_or(after_scheme.len());
         let host_port = &after_scheme[..end];
         host_port.split(':').next().unwrap_or(host_port).to_string()
     } else {
@@ -293,17 +286,22 @@ mod tests {
                 method: "POST".into(),
                 url: "https://api.example.com/v1/users".into(),
                 http_version: "HTTP/2".into(),
-                headers: vec![
-                    HarHeader { name: "content-type".into(), value: "application/json".into() },
-                ],
-                post_data: Some(HarPostData { text: Some("{\"name\":\"test\"}".into()) }),
+                headers: vec![HarHeader {
+                    name: "content-type".into(),
+                    value: "application/json".into(),
+                }],
+                post_data: Some(HarPostData {
+                    text: Some("{\"name\":\"test\"}".into()),
+                }),
             },
             response: HarResponse {
                 status: 201,
                 status_text: "Created".into(),
                 http_version: "HTTP/2".into(),
                 headers: vec![],
-                content: HarContent { text: Some("{\"id\":1}".into()) },
+                content: HarContent {
+                    text: Some("{\"id\":1}".into()),
+                },
             },
         };
 

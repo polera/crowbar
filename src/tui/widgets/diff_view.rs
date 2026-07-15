@@ -3,10 +3,11 @@ use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
 
 pub fn diff_lines<'a>(original: &[String], modified: &[String]) -> Vec<Line<'a>> {
-    let old_text = original.join("\n");
-    let new_text = modified.join("\n");
-
-    let diff = TextDiff::from_lines(&old_text, &new_text);
+    // Diff the existing line slices directly. Joining both inputs copied every
+    // request byte on each frame while the diff view was visible.
+    let original: Vec<&str> = original.iter().map(String::as_str).collect();
+    let modified: Vec<&str> = modified.iter().map(String::as_str).collect();
+    let diff = TextDiff::from_slices(&original, &modified);
     let mut lines = Vec::new();
 
     for change in diff.iter_all_changes() {
@@ -16,12 +17,9 @@ pub fn diff_lines<'a>(original: &[String], modified: &[String]) -> Vec<Line<'a>>
             ChangeTag::Equal => (" ", Style::default().fg(Color::DarkGray)),
         };
 
-        let text = change.as_str().unwrap_or("").trim_end_matches('\n');
+        let text = change.as_str().unwrap_or("");
         lines.push(Line::from(vec![
-            Span::styled(
-                prefix,
-                style.add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
             Span::styled(format!(" {}", text), style),
         ]));
     }
@@ -55,9 +53,9 @@ mod tests {
         let old = vec!["line1".into()];
         let new = vec!["line1".into(), "line2".into()];
         let result = diff_lines(&old, &new);
-        let has_addition = result.iter().any(|l| {
-            l.spans.first().map(|s| s.content.as_ref()) == Some("+")
-        });
+        let has_addition = result
+            .iter()
+            .any(|l| l.spans.first().map(|s| s.content.as_ref()) == Some("+"));
         assert!(has_addition);
     }
 
@@ -66,9 +64,9 @@ mod tests {
         let old = vec!["line1".into(), "line2".into()];
         let new = vec!["line1".into()];
         let result = diff_lines(&old, &new);
-        let has_deletion = result.iter().any(|l| {
-            l.spans.first().map(|s| s.content.as_ref()) == Some("-")
-        });
+        let has_deletion = result
+            .iter()
+            .any(|l| l.spans.first().map(|s| s.content.as_ref()) == Some("-"));
         assert!(has_deletion);
     }
 }

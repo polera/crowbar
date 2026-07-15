@@ -160,13 +160,16 @@ fn apply_rule(
 
     if let Some(uri) = uri
         && (scope == RuleScope::Url || scope == RuleScope::All)
-        && let Cow::Owned(s) = replace_in_str(uri, &rule.match_pattern, &rule.replacement, compiled) {
-            *uri = s;
-        }
+        && let Cow::Owned(s) = replace_in_str(uri, &rule.match_pattern, &rule.replacement, compiled)
+    {
+        *uri = s;
+    }
 
     if scope == RuleScope::Headers || scope == RuleScope::All {
         for (_key, value) in headers.iter_mut() {
-            if let Cow::Owned(s) = replace_in_str(value, &rule.match_pattern, &rule.replacement, compiled) {
+            if let Cow::Owned(s) =
+                replace_in_str(value, &rule.match_pattern, &rule.replacement, compiled)
+            {
                 *value = s;
             }
         }
@@ -174,12 +177,19 @@ fn apply_rule(
 
     if (scope == RuleScope::Body || scope == RuleScope::All)
         && let Ok(text) = std::str::from_utf8(body)
-        && let Cow::Owned(s) = replace_in_str(text, &rule.match_pattern, &rule.replacement, compiled) {
-            *body = Bytes::from(s);
-        }
+        && let Cow::Owned(s) =
+            replace_in_str(text, &rule.match_pattern, &rule.replacement, compiled)
+    {
+        *body = Bytes::from(s);
+    }
 }
 
-fn replace_in_str<'a>(input: &'a str, pattern: &str, replacement: &str, compiled: Option<&Regex>) -> Cow<'a, str> {
+fn replace_in_str<'a>(
+    input: &'a str,
+    pattern: &str,
+    replacement: &str,
+    compiled: Option<&Regex>,
+) -> Cow<'a, str> {
     match compiled {
         Some(re) => re.replace_all(input, replacement),
         None => {

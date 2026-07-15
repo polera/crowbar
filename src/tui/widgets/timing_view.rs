@@ -31,7 +31,10 @@ pub fn timing_lines(timing: &TimingData, total: Duration) -> Vec<Line<'static>> 
         if let Some(dur) = duration {
             let ms = dur.as_secs_f64() * 1000.0;
             let fraction = ms / total_ms;
-            let filled = (fraction * bar_width as f64).round().max(1.0).min(bar_width as f64) as usize;
+            let filled = (fraction * bar_width as f64)
+                .round()
+                .max(1.0)
+                .min(bar_width as f64) as usize;
 
             let bar: String = "\u{2588}".repeat(filled);
             let pad: String = "\u{2591}".repeat(bar_width.saturating_sub(filled));

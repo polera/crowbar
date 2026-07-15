@@ -5,8 +5,8 @@ use ratatui::text::{Line, Span};
 
 use prost_reflect::MessageDescriptor;
 
-use crate::http::protobuf::{self, ProtoField, ProtoValue};
 use crate::http::proto_schema;
+use crate::http::protobuf::{self, ProtoField, ProtoValue};
 use crate::tui::widgets::hex_view;
 
 thread_local! {
@@ -80,9 +80,11 @@ fn render_json<'a>(text: &str, max_lines: usize) -> Vec<Line<'a>> {
     let pretty = JSON_CACHE.with(|cache| {
         let cached = cache.borrow();
         if let Some((ptr, len, ref s)) = *cached
-            && ptr == key.0 && len == key.1 {
-                return Some(s.clone());
-            }
+            && ptr == key.0
+            && len == key.1
+        {
+            return Some(s.clone());
+        }
         None
     });
 
@@ -118,17 +120,21 @@ fn colorize_json_line<'a>(line: &str) -> Line<'a> {
     let trimmed = line.trim_start();
 
     if trimmed.starts_with('"')
-        && let Some(colon_pos) = trimmed.find("\": ") {
-            let indent = &line[..line.len() - trimmed.len()];
-            let key = &trimmed[..colon_pos + 1];
-            let rest = &trimmed[colon_pos + 1..];
+        && let Some(colon_pos) = trimmed.find("\": ")
+    {
+        let indent = &line[..line.len() - trimmed.len()];
+        let key = &trimmed[..colon_pos + 1];
+        let rest = &trimmed[colon_pos + 1..];
 
-            return Line::from(vec![
-                Span::raw(indent.to_string()),
-                Span::styled(key.to_string(), Style::default().fg(Color::Cyan)),
-                Span::styled(rest.to_string(), value_style(rest.trim_start().trim_start_matches(": "))),
-            ]);
-        }
+        return Line::from(vec![
+            Span::raw(indent.to_string()),
+            Span::styled(key.to_string(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                rest.to_string(),
+                value_style(rest.trim_start().trim_start_matches(": ")),
+            ),
+        ]);
+    }
 
     if trimmed.starts_with('"') {
         return Line::styled(line.to_string(), Style::default().fg(Color::Green));
@@ -472,7 +478,15 @@ fn render_proto_fields<'a>(
     max_lines: usize,
     lines: &mut Vec<Line<'a>>,
 ) {
-    let indent = "  ".repeat(depth);
+    // Borrow common indentation depths from static storage to avoid allocating
+    // and cloning a new String for every rendered protobuf field.
+    const SPACES: &str = "                                                                ";
+    let width = depth.saturating_mul(2);
+    let indent = if width <= SPACES.len() {
+        std::borrow::Cow::Borrowed(&SPACES[..width])
+    } else {
+        std::borrow::Cow::Owned(" ".repeat(width))
+    };
 
     for field in fields {
         if lines.len() >= max_lines {
@@ -487,10 +501,7 @@ fn render_proto_fields<'a>(
             ProtoValue::Varint(v) => {
                 lines.push(Line::from(vec![
                     Span::raw(indent.clone()),
-                    Span::styled(
-                        field.number.to_string(),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(field.number.to_string(), Style::default().fg(Color::Cyan)),
                     Span::styled(": ", Style::default().fg(Color::DarkGray)),
                     Span::styled(v.to_string(), Style::default().fg(Color::Magenta)),
                 ]));
@@ -500,10 +511,7 @@ fn render_proto_fields<'a>(
                 let is_double = display.contains('.');
                 let mut spans = vec![
                     Span::raw(indent.clone()),
-                    Span::styled(
-                        field.number.to_string(),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(field.number.to_string(), Style::default().fg(Color::Cyan)),
                     Span::styled(": ", Style::default().fg(Color::DarkGray)),
                     Span::styled(display, Style::default().fg(Color::Magenta)),
                 ];
@@ -520,10 +528,7 @@ fn render_proto_fields<'a>(
                 let is_float = display.contains('.');
                 let mut spans = vec![
                     Span::raw(indent.clone()),
-                    Span::styled(
-                        field.number.to_string(),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(field.number.to_string(), Style::default().fg(Color::Cyan)),
                     Span::styled(": ", Style::default().fg(Color::DarkGray)),
                     Span::styled(display, Style::default().fg(Color::Magenta)),
                 ];
@@ -538,10 +543,7 @@ fn render_proto_fields<'a>(
             ProtoValue::String(s) => {
                 lines.push(Line::from(vec![
                     Span::raw(indent.clone()),
-                    Span::styled(
-                        field.number.to_string(),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(field.number.to_string(), Style::default().fg(Color::Cyan)),
                     Span::styled(": ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         format!("\"{}\"", truncate_string(s, 200)),
@@ -552,10 +554,7 @@ fn render_proto_fields<'a>(
             ProtoValue::Message(sub_fields) => {
                 lines.push(Line::from(vec![
                     Span::raw(indent.clone()),
-                    Span::styled(
-                        field.number.to_string(),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(field.number.to_string(), Style::default().fg(Color::Cyan)),
                     Span::styled(" {", Style::default().fg(Color::DarkGray)),
                 ]));
                 render_proto_fields(sub_fields, depth + 1, max_lines, lines);
@@ -569,10 +568,7 @@ fn render_proto_fields<'a>(
             ProtoValue::Bytes(data) => {
                 lines.push(Line::from(vec![
                     Span::raw(indent.clone()),
-                    Span::styled(
-                        field.number.to_string(),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(field.number.to_string(), Style::default().fg(Color::Cyan)),
                     Span::styled(": ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         format!("<{} bytes>", data.len()),
@@ -588,7 +584,11 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        let end = s.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(s.len());
+        let end = s
+            .char_indices()
+            .nth(max_len)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
         format!("{}...", &s[..end])
     }
 }

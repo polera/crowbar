@@ -36,7 +36,13 @@ pub fn hex_lines(data: &[u8], max_lines: usize) -> Vec<Line<'static>> {
         spans.push(Span::raw(" |"));
         let ascii: String = chunk
             .iter()
-            .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         spans.push(Span::raw(ascii));
         spans.push(Span::raw("|"));

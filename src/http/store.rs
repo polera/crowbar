@@ -2,7 +2,11 @@ use std::collections::HashMap;
 
 use crate::scanning::Finding;
 
-use super::models::{EntryState, GrpcMessage, HistoryEntry, RequestData, RequestId, ResponseData, WsMessage};
+use super::models::{
+    EntryState, GrpcMessage, HistoryEntry, RequestData, RequestId, ResponseData, WsMessage,
+};
+
+const MAX_STREAM_MESSAGES_PER_ENTRY: usize = 1_000;
 
 #[derive(Default)]
 struct FilterCache {
@@ -11,16 +15,25 @@ struct FilterCache {
     entry_count: usize,
 }
 
-#[derive(Default)]
 pub struct InMemoryStore {
     entries: Vec<HistoryEntry>,
     index: HashMap<RequestId, usize>,
     filter_cache: FilterCache,
+    max_entries: usize,
+    complete_count: usize,
+    error_count: usize,
 }
 
 impl InMemoryStore {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            index: HashMap::new(),
+            filter_cache: FilterCache::default(),
+            max_entries: max_entries.max(1),
+            complete_count: 0,
+            error_count: 0,
+        }
     }
 
     pub fn insert(&mut self, request: RequestData) {
@@ -36,22 +49,35 @@ impl InMemoryStore {
             findings: Vec::new(),
         });
         self.index.insert(id, idx);
+        self.evict_oldest_if_needed();
+    }
+
+    fn evict_oldest_if_needed(&mut self) {
+        if self.entries.len() <= self.max_entries {
+            return;
+        }
+        let drop_count = (self.max_entries / 10).max(1);
+        self.entries.drain(..drop_count);
+        self.index.clear();
+        for (idx, entry) in self.entries.iter().enumerate() {
+            self.index.insert(entry.request.id, idx);
+        }
+        self.filter_cache.entry_count = usize::MAX;
+        self.recount_states();
     }
 
     pub fn update_response(&mut self, id: RequestId, response: ResponseData) {
-        if let Some(&idx) = self.index.get(&id)
-            && let Some(entry) = self.entries.get_mut(idx)
-        {
-            entry.response = Some(response);
-            entry.state = EntryState::Complete;
+        if let Some(&idx) = self.index.get(&id) {
+            self.set_state(idx, EntryState::Complete);
+            if let Some(entry) = self.entries.get_mut(idx) {
+                entry.response = Some(response);
+            }
         }
     }
 
     pub fn mark_dropped(&mut self, id: RequestId) {
-        if let Some(&idx) = self.index.get(&id)
-            && let Some(entry) = self.entries.get_mut(idx)
-        {
-            entry.state = EntryState::Dropped;
+        if let Some(&idx) = self.index.get(&id) {
+            self.set_state(idx, EntryState::Dropped);
         }
     }
 
@@ -60,6 +86,9 @@ impl InMemoryStore {
             && let Some(entry) = self.entries.get_mut(idx)
         {
             entry.ws_messages.push(msg);
+            if entry.ws_messages.len() > MAX_STREAM_MESSAGES_PER_ENTRY {
+                entry.ws_messages.drain(..100);
+            }
         }
     }
 
@@ -68,15 +97,19 @@ impl InMemoryStore {
             && let Some(entry) = self.entries.get_mut(idx)
         {
             entry.grpc_messages.push(msg);
+            if entry.grpc_messages.len() > MAX_STREAM_MESSAGES_PER_ENTRY {
+                entry.grpc_messages.drain(..100);
+            }
         }
     }
 
     pub fn update_trailers(&mut self, id: RequestId, trailers: Vec<(String, String)>) {
         if let Some(&idx) = self.index.get(&id)
             && let Some(entry) = self.entries.get_mut(idx)
-            && let Some(resp) = &mut entry.response {
-                resp.trailers = trailers;
-            }
+            && let Some(resp) = &mut entry.response
+        {
+            resp.trailers = trailers;
+        }
     }
 
     pub fn set_findings(&mut self, id: RequestId, findings: Vec<Finding>) {
@@ -88,11 +121,11 @@ impl InMemoryStore {
     }
 
     pub fn mark_error(&mut self, id: RequestId, error: String) {
-        if let Some(&idx) = self.index.get(&id)
-            && let Some(entry) = self.entries.get_mut(idx)
-        {
-            entry.state = EntryState::Error;
-            entry.error_message = Some(error);
+        if let Some(&idx) = self.index.get(&id) {
+            self.set_state(idx, EntryState::Error);
+            if let Some(entry) = self.entries.get_mut(idx) {
+                entry.error_message = Some(error);
+            }
         }
     }
 
@@ -102,6 +135,40 @@ impl InMemoryStore {
 
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
+    }
+
+    pub fn state_counts(&self) -> (usize, usize) {
+        (self.complete_count, self.error_count)
+    }
+
+    fn set_state(&mut self, idx: usize, state: EntryState) {
+        let Some(entry) = self.entries.get_mut(idx) else {
+            return;
+        };
+        match entry.state {
+            EntryState::Complete => self.complete_count = self.complete_count.saturating_sub(1),
+            EntryState::Error => self.error_count = self.error_count.saturating_sub(1),
+            _ => {}
+        }
+        entry.state = state;
+        match state {
+            EntryState::Complete => self.complete_count += 1,
+            EntryState::Error => self.error_count += 1,
+            _ => {}
+        }
+    }
+
+    fn recount_states(&mut self) {
+        self.complete_count = self
+            .entries
+            .iter()
+            .filter(|entry| entry.state == EntryState::Complete)
+            .count();
+        self.error_count = self
+            .entries
+            .iter()
+            .filter(|entry| entry.state == EntryState::Error)
+            .count();
     }
 
     pub fn refresh_filter_cache(&mut self, filter: &str) {
@@ -160,6 +227,7 @@ impl InMemoryStore {
             self.entries.push(entry);
             self.index.insert(id, idx);
         }
+        self.recount_states();
     }
 
     pub fn len(&self) -> usize {
@@ -168,5 +236,42 @@ impl InMemoryStore {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use std::time::SystemTime;
+
+    fn request(id: u64) -> RequestData {
+        RequestData {
+            id: RequestId(id),
+            method: "GET".into(),
+            uri: "/".into(),
+            host: "example.com".into(),
+            version: super::super::models::HttpVersion::Http11,
+            headers: Vec::new(),
+            body: Bytes::new(),
+            is_tls: false,
+            is_grpc: false,
+            timestamp: SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn history_is_bounded_and_state_counts_track_transitions() {
+        let mut store = InMemoryStore::new(3);
+        for id in 1..=4 {
+            store.insert(request(id));
+        }
+        assert_eq!(store.len(), 3);
+        assert!(store.get(RequestId(1)).is_none());
+
+        store.mark_error(RequestId(2), "failure".into());
+        assert_eq!(store.state_counts(), (0, 1));
+        store.mark_dropped(RequestId(2));
+        assert_eq!(store.state_counts(), (0, 0));
     }
 }

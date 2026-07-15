@@ -62,7 +62,11 @@ pub fn to_raw(entry: &HistoryEntry) -> String {
 
     if let Some(resp) = &entry.response {
         output.push_str("\r\n---\r\n\r\n");
-        let _ = write!(output, "{} {} {}\r\n", resp.version, resp.status, resp.reason);
+        let _ = write!(
+            output,
+            "{} {} {}\r\n",
+            resp.version, resp.status, resp.reason
+        );
 
         for (key, value) in &resp.headers {
             let _ = write!(output, "{}: {}\r\n", key, value);
@@ -240,9 +244,9 @@ fn extract_path(uri: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::models::*;
     use bytes::Bytes;
     use std::time::{Duration, UNIX_EPOCH};
-    use crate::http::models::*;
 
     fn make_request(method: &str, uri: &str, host: &str, is_tls: bool) -> RequestData {
         RequestData {
@@ -414,7 +418,9 @@ mod tests {
         let entry = make_entry(req, Some(resp));
         let har = to_har(&[entry]);
         let parsed: serde_json::Value = serde_json::from_str(&har).unwrap();
-        let started = parsed["log"]["entries"][0]["startedDateTime"].as_str().unwrap();
+        let started = parsed["log"]["entries"][0]["startedDateTime"]
+            .as_str()
+            .unwrap();
         assert!(started.ends_with('Z'));
         assert!(started.contains('T'));
         assert_eq!(started.len(), 20);

@@ -42,7 +42,7 @@ impl InterceptState {
     pub fn intercept_request(
         &self,
         request: &RequestData,
-        ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
+        ui_tx: &mpsc::Sender<ProxyToUi>,
     ) -> Option<oneshot::Receiver<InterceptDecision>> {
         if !self.is_enabled() {
             return None;
@@ -52,7 +52,7 @@ impl InterceptState {
         let id = request.id;
 
         if ui_tx
-            .send(ProxyToUi::InterceptedRequest(request.clone()))
+            .try_send(ProxyToUi::InterceptedRequest(request.clone()))
             .is_err()
         {
             return None;
@@ -82,5 +82,4 @@ impl InterceptState {
             }
         }
     }
-
 }

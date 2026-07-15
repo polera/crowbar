@@ -44,10 +44,7 @@ pub fn header_lines<'a>(headers: &'a [(String, String)]) -> Vec<Line<'a>> {
 pub fn trailer_lines<'a>(trailers: &'a [(String, String)]) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::raw(""),
-        Line::styled(
-            "──── Trailers ────",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Line::styled("──── Trailers ────", Style::default().fg(Color::DarkGray)),
     ];
     for (key, value) in trailers {
         let value_style = if key == "grpc-status" {

@@ -50,7 +50,10 @@ pub(crate) fn date_to_days(year: u64, month: u64, day: u64) -> u64 {
     for y in 1970..year {
         days += if is_leap(y) { 366 } else { 365 };
     }
-    for m in month_lengths(year).iter().take((month as usize).saturating_sub(1)) {
+    for m in month_lengths(year)
+        .iter()
+        .take((month as usize).saturating_sub(1))
+    {
         days += m;
     }
     days + day.saturating_sub(1)
@@ -75,15 +78,14 @@ pub(crate) fn url_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(
-                &input[i + 1..i + 3],
-                16,
-            ) {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&input[i + 1..i + 3], 16)
+        {
+            result.push(byte);
+            i += 3;
+            continue;
+        }
         if bytes[i] == b'+' {
             result.push(b' ');
         } else {
@@ -164,7 +166,11 @@ mod tests {
     fn date_days_roundtrip() {
         for (y, m, d) in [(1970, 1, 1), (2000, 6, 15), (2024, 12, 31), (1999, 2, 28)] {
             let days = date_to_days(y, m, d);
-            assert_eq!(days_to_date(days), (y, m, d), "roundtrip failed for {y}-{m}-{d}");
+            assert_eq!(
+                days_to_date(days),
+                (y, m, d),
+                "roundtrip failed for {y}-{m}-{d}"
+            );
         }
     }
 
@@ -190,7 +196,10 @@ mod tests {
 
     #[test]
     fn extract_path_with_query() {
-        assert_eq!(extract_path("https://example.com/search?q=test"), "/search?q=test");
+        assert_eq!(
+            extract_path("https://example.com/search?q=test"),
+            "/search?q=test"
+        );
     }
 
     #[test]

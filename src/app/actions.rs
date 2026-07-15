@@ -109,7 +109,10 @@ impl App {
     fn macro_send_next(&mut self) {
         if self.macros.current_step >= self.macros.steps.len() {
             self.macros.running = false;
-            self.set_status(format!("Macro complete ({} steps)", self.macros.steps.len()));
+            self.set_status(format!(
+                "Macro complete ({} steps)",
+                self.macros.steps.len()
+            ));
             return;
         }
 
@@ -119,13 +122,12 @@ impl App {
         let ui_tx = self.ui_tx.clone();
 
         tokio::spawn(async move {
-            let ui_tx_inner = ui_tx.clone();
             match repeater::send_raw_request(request).await {
                 Ok(resp) => {
-                    let _ = ui_tx_inner.send(ProxyToUi::MacroResponse(step_idx, resp));
+                    let _ = ui_tx.try_send(ProxyToUi::MacroResponse(step_idx, resp));
                 }
                 Err(e) => {
-                    let _ = ui_tx_inner.send(ProxyToUi::MacroError(step_idx, e));
+                    let _ = ui_tx.try_send(ProxyToUi::MacroError(step_idx, e));
                 }
             }
         });

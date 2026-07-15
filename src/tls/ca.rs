@@ -18,7 +18,7 @@ pub struct CertificateAuthority {
 impl CertificateAuthority {
     pub fn load_or_generate() -> anyhow::Result<Self> {
         let dir = Self::config_dir()?;
-        std::fs::create_dir_all(&dir)?;
+        crate::fs_security::harden_private_tree(&dir)?;
 
         let cert_path = dir.join("ca.pem");
         let key_path = dir.join("ca.key");
@@ -78,8 +78,8 @@ impl CertificateAuthority {
     }
 
     fn save_to_disk(&self, cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
-        std::fs::write(cert_path, &self.ca_cert_pem)?;
-        std::fs::write(key_path, self.ca_key.serialize_pem())?;
+        crate::fs_security::write_private(cert_path, &self.ca_cert_pem)?;
+        crate::fs_security::write_private(key_path, self.ca_key.serialize_pem())?;
         Ok(())
     }
 

@@ -230,24 +230,39 @@ pub struct HistoryEntry {
 impl HistoryEntry {
     pub fn matches_filter(&self, filter: &str) -> bool {
         let req = &self.request;
-        if req.method.to_lowercase().contains(filter) {
+        if contains_case_insensitive(&req.method, filter) {
             return true;
         }
-        if req.host.to_lowercase().contains(filter) {
+        if contains_case_insensitive(&req.host, filter) {
             return true;
         }
-        if req.uri.to_lowercase().contains(filter) {
+        if contains_case_insensitive(&req.uri, filter) {
             return true;
         }
         if let Some(resp) = &self.response
-            && resp.status.to_string().contains(filter) {
-                return true;
-            }
+            && resp.status.to_string().contains(filter)
+        {
+            return true;
+        }
         if self.request.is_grpc && "grpc".starts_with(filter) {
             return true;
         }
         false
     }
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if !haystack.is_ascii() || !needle.is_ascii() {
+        return haystack.to_lowercase().contains(&needle.to_lowercase());
+    }
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|candidate| candidate.eq_ignore_ascii_case(needle))
 }
 
 #[cfg(test)]
@@ -276,14 +291,26 @@ mod tests {
 
     #[test]
     fn http_version_from_hyper() {
-        assert_eq!(HttpVersion::from(hyper::Version::HTTP_10), HttpVersion::Http10);
-        assert_eq!(HttpVersion::from(hyper::Version::HTTP_11), HttpVersion::Http11);
-        assert_eq!(HttpVersion::from(hyper::Version::HTTP_2), HttpVersion::Http2);
+        assert_eq!(
+            HttpVersion::from(hyper::Version::HTTP_10),
+            HttpVersion::Http10
+        );
+        assert_eq!(
+            HttpVersion::from(hyper::Version::HTTP_11),
+            HttpVersion::Http11
+        );
+        assert_eq!(
+            HttpVersion::from(hyper::Version::HTTP_2),
+            HttpVersion::Http2
+        );
     }
 
     #[test]
     fn http_version_unknown_defaults_to_http11() {
-        assert_eq!(HttpVersion::from(hyper::Version::HTTP_3), HttpVersion::Http11);
+        assert_eq!(
+            HttpVersion::from(hyper::Version::HTTP_3),
+            HttpVersion::Http11
+        );
     }
 
     #[test]
@@ -416,7 +443,13 @@ mod tests {
         assert_eq!(msg.text(), None);
     }
 
-    fn make_entry(method: &str, host: &str, uri: &str, is_grpc: bool, status: Option<u16>) -> HistoryEntry {
+    fn make_entry(
+        method: &str,
+        host: &str,
+        uri: &str,
+        is_grpc: bool,
+        status: Option<u16>,
+    ) -> HistoryEntry {
         let request = RequestData {
             id: RequestId(1),
             method: method.into(),
@@ -439,7 +472,11 @@ mod tests {
             duration: Duration::from_millis(10),
             timing: None,
         });
-        let state = if response.is_some() { EntryState::Complete } else { EntryState::Pending };
+        let state = if response.is_some() {
+            EntryState::Complete
+        } else {
+            EntryState::Pending
+        };
         HistoryEntry {
             request,
             response,
@@ -462,6 +499,12 @@ mod tests {
     fn matches_filter_by_host() {
         let entry = make_entry("GET", "example.com", "/", false, Some(200));
         assert!(entry.matches_filter("example"));
+    }
+
+    #[test]
+    fn matches_filter_unicode_case_insensitively() {
+        let entry = make_entry("GET", "BÜCHER.example", "/", false, Some(200));
+        assert!(entry.matches_filter("bücher"));
     }
 
     #[test]
@@ -496,7 +539,11 @@ mod tests {
         map.insert("x-custom", "value".parse().unwrap());
         let headers = extract_headers(&map);
         assert_eq!(headers.len(), 2);
-        assert!(headers.iter().any(|(k, v)| k == "content-type" && v == "text/html"));
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "content-type" && v == "text/html")
+        );
     }
 
     #[test]
@@ -523,7 +570,9 @@ mod tests {
             data: Bytes,
         }
 
-        let original = Wrapper { data: Bytes::from("hello world") };
+        let original = Wrapper {
+            data: Bytes::from("hello world"),
+        };
         let json = serde_json::to_string(&original).unwrap();
         let restored: Wrapper = serde_json::from_str(&json).unwrap();
         assert_eq!(original, restored);

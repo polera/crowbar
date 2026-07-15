@@ -36,7 +36,8 @@ impl App {
             }
             KeyCode::Char('e') => {
                 if let Some(req) = self.intercept_ui.queue.front() {
-                    self.intercept_ui.editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
+                    self.intercept_ui.editor =
+                        TextEditor::new(codec::request_to_lines(req), self.editor_mode);
                     self.intercept_ui.editing = true;
                     self.intercept_ui.scroll = 0;
                 }
@@ -76,8 +77,16 @@ impl App {
                     .parse::<SocketAddr>()
                     .or_else(|_| format!("127.0.0.1:{}", input).parse::<SocketAddr>());
                 match parsed {
-                    Ok(addr) => {
+                    Ok(addr) if addr.ip().is_loopback() || self.allow_remote => {
                         self.pending_rebind = Some(addr);
+                        self.editing_bind_addr = false;
+                        self.bind_addr_buffer.clear();
+                    }
+                    Ok(addr) => {
+                        self.set_status(format!(
+                            "Refusing remote bind {} without --allow-remote",
+                            addr
+                        ));
                         self.editing_bind_addr = false;
                         self.bind_addr_buffer.clear();
                     }
@@ -118,7 +127,11 @@ impl App {
                 self.set_status(if count == 0 {
                     "Scope cleared — capturing all traffic".to_string()
                 } else {
-                    format!("Scope updated ({} pattern{})", count, if count == 1 { "" } else { "s" })
+                    format!(
+                        "Scope updated ({} pattern{})",
+                        count,
+                        if count == 1 { "" } else { "s" }
+                    )
                 });
             }
             KeyCode::Char(c) => {
@@ -150,14 +163,12 @@ impl App {
                     self.history.selected += 1;
                 }
             }
-            KeyCode::Home | KeyCode::Char('g')
-                if !self.history.detail_open => {
-                    self.history.selected = 0;
-                }
-            KeyCode::End | KeyCode::Char('G')
-                if !self.history.detail_open && entry_count > 0 => {
-                    self.history.selected = entry_count - 1;
-                }
+            KeyCode::Home | KeyCode::Char('g') if !self.history.detail_open => {
+                self.history.selected = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') if !self.history.detail_open && entry_count > 0 => {
+                self.history.selected = entry_count - 1;
+            }
             KeyCode::Enter => {
                 if self.history.detail_open {
                     self.history.detail_open = false;
@@ -167,56 +178,56 @@ impl App {
                     self.history.scroll = 0;
                 }
             }
-            KeyCode::Esc
-                if self.history.detail_open => {
-                    self.history.detail_open = false;
-                    self.history.scroll = 0;
-                }
-            KeyCode::Char('r')
-                if entry_count > 0 => {
-                    self.send_to_repeater();
-                }
-            KeyCode::Char('/')
-                if !self.history.detail_open => {
-                    self.history.filtering = true;
-                }
+            KeyCode::Esc if self.history.detail_open => {
+                self.history.detail_open = false;
+                self.history.scroll = 0;
+            }
+            KeyCode::Char('r') if entry_count > 0 => {
+                self.send_to_repeater();
+            }
+            KeyCode::Char('/') if !self.history.detail_open => {
+                self.history.filtering = true;
+            }
             KeyCode::Char('c') => {
                 if entry_count > 0
-                    && let Some(entry) = self.store.filtered_entry(self.history.selected) {
-                        let curl = crate::http::export::to_curl(entry);
-                        self.export_to_file("curl", "sh", &curl);
-                    }
+                    && let Some(entry) = self.store.filtered_entry(self.history.selected)
+                {
+                    let curl = crate::http::export::to_curl(entry);
+                    self.export_to_file("curl", "sh", &curl);
+                }
             }
             KeyCode::Char('w') => {
                 if entry_count > 0
-                    && let Some(entry) = self.store.filtered_entry(self.history.selected) {
-                        let raw = crate::http::export::to_raw(entry);
-                        self.export_to_file("raw", "txt", &raw);
-                    }
-            }
-            KeyCode::Char('h')
-                if !self.history.detail_open => {
-                    let entries: Vec<_> = self.store.filtered_entries_iter()
-                        .cloned()
-                        .collect();
-                    let har = crate::http::export::to_har(&entries);
-                    self.export_to_file("har", "har", &har);
+                    && let Some(entry) = self.store.filtered_entry(self.history.selected)
+                {
+                    let raw = crate::http::export::to_raw(entry);
+                    self.export_to_file("raw", "txt", &raw);
                 }
+            }
+            KeyCode::Char('h') if !self.history.detail_open => {
+                let entries: Vec<_> = self.store.filtered_entries_iter().cloned().collect();
+                let har = crate::http::export::to_har(&entries);
+                self.export_to_file("har", "har", &har);
+            }
             KeyCode::Char('m') => {
                 if entry_count > 0
-                    && let Some(entry) = self.store.filtered_entry(self.history.selected) {
-                        self.macros.steps.push(SequenceStep::new(entry.request.clone()));
-                        self.set_status(format!("Added to macro ({} steps)", self.macros.steps.len()));
-                    }
+                    && let Some(entry) = self.store.filtered_entry(self.history.selected)
+                {
+                    self.macros
+                        .steps
+                        .push(SequenceStep::new(entry.request.clone()));
+                    self.set_status(format!(
+                        "Added to macro ({} steps)",
+                        self.macros.steps.len()
+                    ));
+                }
             }
             _ => {}
         }
     }
 
     pub(super) fn handle_rules_key(&mut self, key: KeyEvent) {
-        let rules = self.rules.read();
-        let count = rules.len();
-        drop(rules);
+        let count = self.rules.read().len();
 
         match key.code {
             KeyCode::Char('a') => {
@@ -225,64 +236,59 @@ impl App {
                 rules.push(crate::rules::Rule::new(name));
                 self.rules_ui.selected = rules.len() - 1;
             }
-            KeyCode::Char('x')
-                if count > 0 => {
-                    let mut rules = self.rules.write();
-                    rules.remove(self.rules_ui.selected);
-                    if self.rules_ui.selected >= rules.len() && !rules.is_empty() {
-                        self.rules_ui.selected = rules.len() - 1;
-                    }
+            KeyCode::Char('x') if count > 0 => {
+                let mut rules = self.rules.write();
+                rules.remove(self.rules_ui.selected);
+                if self.rules_ui.selected >= rules.len() && !rules.is_empty() {
+                    self.rules_ui.selected = rules.len() - 1;
                 }
-            KeyCode::Enter
-                if count > 0 => {
-                    let mut rules = self.rules.write();
-                    rules[self.rules_ui.selected].enabled = !rules[self.rules_ui.selected].enabled;
-                }
-            KeyCode::Char('t')
-                if count > 0 => {
-                    let mut rules = self.rules.write();
-                    rules[self.rules_ui.selected].target = rules[self.rules_ui.selected].target.next();
-                }
-            KeyCode::Char('s')
-                if count > 0 => {
-                    let mut rules = self.rules.write();
-                    rules[self.rules_ui.selected].scope = rules[self.rules_ui.selected].scope.next();
-                }
-            KeyCode::Char('R')
-                if count > 0 => {
-                    let mut rules = self.rules.write();
-                    rules[self.rules_ui.selected].is_regex = !rules[self.rules_ui.selected].is_regex;
-                    rules[self.rules_ui.selected].invalidate_regex();
-                }
-            KeyCode::Char('n')
-                if count > 0 => {
+            }
+            KeyCode::Enter if count > 0 => {
+                let mut rules = self.rules.write();
+                rules[self.rules_ui.selected].enabled = !rules[self.rules_ui.selected].enabled;
+            }
+            KeyCode::Char('t') if count > 0 => {
+                let mut rules = self.rules.write();
+                rules[self.rules_ui.selected].target = rules[self.rules_ui.selected].target.next();
+            }
+            KeyCode::Char('s') if count > 0 => {
+                let mut rules = self.rules.write();
+                rules[self.rules_ui.selected].scope = rules[self.rules_ui.selected].scope.next();
+            }
+            KeyCode::Char('R') if count > 0 => {
+                let mut rules = self.rules.write();
+                rules[self.rules_ui.selected].is_regex = !rules[self.rules_ui.selected].is_regex;
+                rules[self.rules_ui.selected].invalidate_regex();
+            }
+            KeyCode::Char('n') if count > 0 => {
+                self.rules_ui.edit_buffer = {
                     let rules = self.rules.read();
-                    self.rules_ui.edit_buffer = rules[self.rules_ui.selected].name.clone();
-                    drop(rules);
-                    self.rules_ui.editing_field = Some(RuleField::Name);
-                }
-            KeyCode::Char('p')
-                if count > 0 => {
+                    rules[self.rules_ui.selected].name.clone()
+                };
+                self.rules_ui.editing_field = Some(RuleField::Name);
+            }
+            KeyCode::Char('p') if count > 0 => {
+                self.rules_ui.edit_buffer = {
                     let rules = self.rules.read();
-                    self.rules_ui.edit_buffer = rules[self.rules_ui.selected].match_pattern.clone();
-                    drop(rules);
-                    self.rules_ui.editing_field = Some(RuleField::Pattern);
-                }
-            KeyCode::Char('e')
-                if count > 0 => {
+                    rules[self.rules_ui.selected].match_pattern.clone()
+                };
+                self.rules_ui.editing_field = Some(RuleField::Pattern);
+            }
+            KeyCode::Char('e') if count > 0 => {
+                self.rules_ui.edit_buffer = {
                     let rules = self.rules.read();
-                    self.rules_ui.edit_buffer = rules[self.rules_ui.selected].replacement.clone();
-                    drop(rules);
-                    self.rules_ui.editing_field = Some(RuleField::Replacement);
-                }
-            KeyCode::Up | KeyCode::Char('k')
-                if self.rules_ui.selected > 0 => {
-                    self.rules_ui.selected -= 1;
-                }
+                    rules[self.rules_ui.selected].replacement.clone()
+                };
+                self.rules_ui.editing_field = Some(RuleField::Replacement);
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.rules_ui.selected > 0 => {
+                self.rules_ui.selected -= 1;
+            }
             KeyCode::Down | KeyCode::Char('j')
-                if count > 0 && self.rules_ui.selected < count - 1 => {
-                    self.rules_ui.selected += 1;
-                }
+                if count > 0 && self.rules_ui.selected < count - 1 =>
+            {
+                self.rules_ui.selected += 1;
+            }
             KeyCode::Char('E') => {
                 self.export_rules();
             }
@@ -310,7 +316,11 @@ impl App {
                     Ok(imported) => {
                         let count = imported.len();
                         self.rules.write().extend(imported);
-                        self.set_status(format!("Imported {} rules from {}", count, expanded.display()));
+                        self.set_status(format!(
+                            "Imported {} rules from {}",
+                            count,
+                            expanded.display()
+                        ));
                     }
                     Err(e) => {
                         self.set_status(format!("Import failed: {}", e));
@@ -341,14 +351,17 @@ impl App {
                     if self.rules_ui.selected < rules.len() {
                         match field {
                             RuleField::Name => {
-                                rules[self.rules_ui.selected].name = self.rules_ui.edit_buffer.clone();
+                                rules[self.rules_ui.selected].name =
+                                    self.rules_ui.edit_buffer.clone();
                             }
                             RuleField::Pattern => {
-                                rules[self.rules_ui.selected].match_pattern = self.rules_ui.edit_buffer.clone();
+                                rules[self.rules_ui.selected].match_pattern =
+                                    self.rules_ui.edit_buffer.clone();
                                 rules[self.rules_ui.selected].invalidate_regex();
                             }
                             RuleField::Replacement => {
-                                rules[self.rules_ui.selected].replacement = self.rules_ui.edit_buffer.clone();
+                                rules[self.rules_ui.selected].replacement =
+                                    self.rules_ui.edit_buffer.clone();
                             }
                         }
                     }
@@ -431,7 +444,9 @@ impl App {
         match self.tools.mode {
             ToolsMode::UrlEncode => super::encode::url_encode(&input),
             ToolsMode::UrlDecode => crate::http::url_decode(&input),
-            ToolsMode::Base64Encode => base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
+            ToolsMode::Base64Encode => {
+                base64::engine::general_purpose::STANDARD.encode(input.as_bytes())
+            }
             ToolsMode::Base64Decode => {
                 match base64::engine::general_purpose::STANDARD.decode(input.trim()) {
                     Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -439,12 +454,10 @@ impl App {
                 }
             }
             ToolsMode::HexEncode => super::encode::hex_encode(input.as_bytes()),
-            ToolsMode::HexDecode => {
-                match super::encode::hex_decode(input.trim()) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                    Err(e) => format!("Error: {}", e),
-                }
-            }
+            ToolsMode::HexDecode => match super::encode::hex_decode(input.trim()) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => format!("Error: {}", e),
+            },
         }
     }
 
@@ -480,33 +493,37 @@ impl App {
                     self.repeater_send();
                 }
             }
-            (KeyModifiers::NONE, KeyCode::Char('e'))
-                if self.repeater.editor.has_content() => {
-                    self.repeater.editing = true;
-                    self.repeater.editor.cursor_line = 0;
-                    self.repeater.editor.cursor_col = 0;
-                    if self.editor_mode == EditorMode::Vim {
-                        self.repeater.editor.vim_mode = crate::editor::VimMode::Insert;
-                    }
+            (KeyModifiers::NONE, KeyCode::Char('e')) if self.repeater.editor.has_content() => {
+                self.repeater.editing = true;
+                self.repeater.editor.cursor_line = 0;
+                self.repeater.editor.cursor_col = 0;
+                if self.editor_mode == EditorMode::Vim {
+                    self.repeater.editor.vim_mode = crate::editor::VimMode::Insert;
                 }
+            }
             (KeyModifiers::NONE, KeyCode::Char('d'))
-                if !self.macros.show && self.repeater.original.is_some() => {
-                    self.repeater.show_diff = !self.repeater.show_diff;
-                }
+                if !self.macros.show && self.repeater.original.is_some() =>
+            {
+                self.repeater.show_diff = !self.repeater.show_diff;
+            }
             (KeyModifiers::NONE, KeyCode::Enter)
-                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running => {
-                    self.load_macro_step(true);
-                }
+                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running =>
+            {
+                self.load_macro_step(true);
+            }
             (KeyModifiers::NONE, KeyCode::Char('e'))
-                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running => {
-                    self.load_macro_step(false);
-                }
+                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running =>
+            {
+                self.load_macro_step(false);
+            }
             (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
                 self.macros.show = !self.macros.show;
             }
             (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
                 if self.macros.show {
-                    if !self.macros.steps.is_empty() && self.macros.selected < self.macros.steps.len() - 1 {
+                    if !self.macros.steps.is_empty()
+                        && self.macros.selected < self.macros.steps.len() - 1
+                    {
                         self.macros.selected += 1;
                     }
                 } else {
@@ -529,17 +546,21 @@ impl App {
                 self.repeater.resp_scroll = self.repeater.resp_scroll.saturating_sub(1);
             }
             (KeyModifiers::NONE, KeyCode::Char('x'))
-                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running => {
-                    self.macros.steps.remove(self.macros.selected);
-                    if self.macros.selected >= self.macros.steps.len() && !self.macros.steps.is_empty() {
-                        self.macros.selected = self.macros.steps.len() - 1;
-                    }
+                if self.macros.show && !self.macros.steps.is_empty() && !self.macros.running =>
+            {
+                self.macros.steps.remove(self.macros.selected);
+                if self.macros.selected >= self.macros.steps.len() && !self.macros.steps.is_empty()
+                {
+                    self.macros.selected = self.macros.steps.len() - 1;
                 }
-            (KeyModifiers::NONE, KeyCode::Char('X')) | (KeyModifiers::SHIFT, KeyCode::Char('X'))
-                if self.macros.show && !self.macros.running => {
-                    self.macros.steps.clear();
-                    self.macros.selected = 0;
-                }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('X'))
+            | (KeyModifiers::SHIFT, KeyCode::Char('X'))
+                if self.macros.show && !self.macros.running =>
+            {
+                self.macros.steps.clear();
+                self.macros.selected = 0;
+            }
             _ => {}
         }
     }
@@ -554,34 +575,28 @@ impl App {
 
         match action {
             EditorAction::Consumed => {}
-            EditorAction::ExitEditor => {
-                match target {
-                    EditorTarget::Intercept => {
-                        self.intercept_ui.editing = false;
-                        self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
-                    }
-                    EditorTarget::Repeater => {
-                        self.repeater.editing = false;
-                    }
+            EditorAction::ExitEditor => match target {
+                EditorTarget::Intercept => {
+                    self.intercept_ui.editing = false;
+                    self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
                 }
-            }
-            EditorAction::Enter => {
-                match target {
-                    EditorTarget::Intercept => self.forward_edited_intercept(),
-                    EditorTarget::Repeater => {
-                        self.repeater.editor.insert_newline();
-                    }
+                EditorTarget::Repeater => {
+                    self.repeater.editing = false;
                 }
-            }
-            EditorAction::CtrlEnter => {
-                match target {
-                    EditorTarget::Intercept => self.forward_edited_intercept(),
-                    EditorTarget::Repeater => {
-                        self.repeater.editing = false;
-                        self.repeater_send();
-                    }
+            },
+            EditorAction::Enter => match target {
+                EditorTarget::Intercept => self.forward_edited_intercept(),
+                EditorTarget::Repeater => {
+                    self.repeater.editor.insert_newline();
                 }
-            }
+            },
+            EditorAction::CtrlEnter => match target {
+                EditorTarget::Intercept => self.forward_edited_intercept(),
+                EditorTarget::Repeater => {
+                    self.repeater.editing = false;
+                    self.repeater_send();
+                }
+            },
             EditorAction::Custom(_) => {}
         }
     }

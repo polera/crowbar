@@ -3,6 +3,7 @@ mod channel;
 mod config;
 mod editor;
 mod event;
+mod fs_security;
 mod http;
 mod proxy;
 mod rules;
@@ -18,14 +19,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use crate::app::App;
+use crate::app::{App, AppInit};
 use crate::channel::ProxyToUi;
 use crate::config::Config;
 use crate::event::{AppEvent, EventLoop};
+use crate::proxy::ProxyContext;
 use crate::proxy::intercept::InterceptState;
 use crate::proxy::scope::Scope;
 use crate::proxy::server::ProxyServer;
-use crate::proxy::ProxyContext;
 use crate::rules::SharedRules;
 use crate::tls::ca::CertificateAuthority;
 use crate::tls::cert_cache::CertCache;
@@ -35,12 +36,19 @@ use crate::tui::terminal;
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
 
+    let log_dir = dirs::home_dir().unwrap_or_default().join(".crowbar");
+    crate::fs_security::harden_private_tree(&log_dir)?;
+
     if let Some(cmd) = config.command {
         return handle_command(cmd);
     }
 
-    let log_dir = dirs::home_dir().unwrap_or_default().join(".crowbar");
-    std::fs::create_dir_all(&log_dir)?;
+    if !config.bind.ip().is_loopback() && !config.allow_remote {
+        anyhow::bail!(
+            "refusing non-loopback bind {}; pass --allow-remote after securing network access",
+            config.bind
+        );
+    }
 
     let file_appender = tracing_appender::rolling::never(&log_dir, "crowbar.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -54,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     info!("Starting crowbar proxy on {}", config.bind);
+    crate::fs_security::harden_private_tree(&log_dir)?;
 
     if !config.proto_dir.is_empty() {
         match crate::http::proto_schema::init(&config.proto_dir, &config.proto_include) {
@@ -74,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cancel = CancellationToken::new();
 
-    let (ui_tx, ui_rx) = mpsc::unbounded_channel::<ProxyToUi>();
+    let (ui_tx, ui_rx) = mpsc::channel::<ProxyToUi>(1_024);
     let app_tx = ui_tx.clone();
 
     let bound = {
@@ -109,12 +118,9 @@ async fn main() -> anyhow::Result<()> {
             intercept: intercept.clone(),
             scope: scope.clone(),
             rules: rules.clone(),
+            limits: config.limits,
         };
-        let server = ProxyServer::new(
-            bind_addr,
-            ctx,
-            cancel.clone(),
-        );
+        let server = ProxyServer::new(bind_addr, ctx, cancel.clone());
         tokio::spawn(async move {
             if let Err(e) = server.run(listener).await {
                 tracing::error!("Proxy server error: {}", e);
@@ -129,7 +135,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut tui = terminal::init()?;
-    let mut app = App::new(bind_addr, intercept.clone(), scope.clone(), rules.clone(), app_tx, config.editor_mode);
+    let mut app = App::new(AppInit {
+        bind_addr,
+        intercept_state: intercept.clone(),
+        scope: scope.clone(),
+        rules: rules.clone(),
+        ui_tx: app_tx,
+        editor_mode: config.editor_mode,
+        allow_remote: config.allow_remote,
+        proxy_limits: config.limits,
+        max_history_entries: config.max_history_entries,
+    });
     app.proxy_running = proxy_running;
     if !proxy_running {
         app.status_message = Some((
@@ -197,12 +213,9 @@ async fn run_app(
                         intercept: app.intercept_state.clone(),
                         scope: app.scope.clone(),
                         rules: app.rules.clone(),
+                        limits: app.proxy_limits,
                     };
-                    let server = ProxyServer::new(
-                        new_addr,
-                        ctx,
-                        cancel.clone(),
-                    );
+                    let server = ProxyServer::new(new_addr, ctx, cancel.clone());
                     tokio::spawn(async move {
                         if let Err(e) = server.run(listener).await {
                             tracing::error!("Proxy server error: {}", e);
@@ -254,8 +267,14 @@ fn handle_command(cmd: crate::config::Command) -> anyhow::Result<()> {
                     eprintln!("CA certificate written to {}", path.display());
                     eprintln!();
                     eprintln!("To trust this certificate:");
-                    eprintln!("  macOS:   security add-trusted-cert -d -r trustRoot -k ~/Library/Keychains/login.keychain-db {}", path.display());
-                    eprintln!("  Linux:   sudo cp {} /usr/local/share/ca-certificates/crowbar.crt && sudo update-ca-certificates", path.display());
+                    eprintln!(
+                        "  macOS:   security add-trusted-cert -d -r trustRoot -k ~/Library/Keychains/login.keychain-db {}",
+                        path.display()
+                    );
+                    eprintln!(
+                        "  Linux:   sudo cp {} /usr/local/share/ca-certificates/crowbar.crt && sudo update-ca-certificates",
+                        path.display()
+                    );
                     eprintln!("  Firefox: Settings > Privacy & Security > Certificates > Import");
                 }
                 None => {
@@ -273,10 +292,7 @@ fn handle_command(cmd: crate::config::Command) -> anyhow::Result<()> {
                     .to_string_lossy()
                     .into_owned()
             });
-            let macro_requests = session
-                .macros
-                .map(|m| m.steps)
-                .unwrap_or_default();
+            let macro_requests = session.macros.map(|m| m.steps).unwrap_or_default();
             let entry_count = session.entries.len();
             let path = crate::http::session::save(session.entries, macro_requests, &session_name)?;
             eprintln!(
