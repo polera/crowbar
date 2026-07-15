@@ -30,7 +30,9 @@ pub fn generate_leaf_cert(
     Ok(CertifiedKey::new(cert_chain, signing_key))
 }
 
-pub fn build_server_config(certified_key: Arc<CertifiedKey>) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+pub fn build_server_config(
+    certified_key: Arc<CertifiedKey>,
+) -> anyhow::Result<Arc<rustls::ServerConfig>> {
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(SingleCertResolver(certified_key)));
@@ -44,10 +46,7 @@ pub fn build_server_config(certified_key: Arc<CertifiedKey>) -> anyhow::Result<A
 struct SingleCertResolver(Arc<CertifiedKey>);
 
 impl rustls::server::ResolvesServerCert for SingleCertResolver {
-    fn resolve(
-        &self,
-        _client_hello: rustls::server::ClientHello<'_>,
-    ) -> Option<Arc<CertifiedKey>> {
+    fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(Arc::clone(&self.0))
     }
 }

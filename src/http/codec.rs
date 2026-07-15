@@ -85,7 +85,8 @@ pub fn lines_to_request(lines: &[String], original: &RequestData) -> RequestData
     let body = if body_lines.is_empty() {
         Bytes::new()
     } else if original.is_grpc {
-        encode_grpc_body_lines(&body_lines, &uri).unwrap_or_else(|| Bytes::from(body_lines.join("\n")))
+        encode_grpc_body_lines(&body_lines, &uri)
+            .unwrap_or_else(|| Bytes::from(body_lines.join("\n")))
     } else {
         Bytes::from(body_lines.join("\n"))
     };
@@ -220,9 +221,7 @@ mod tests {
         let uri = "https://example.com/sample.UserService/GetUser";
         let desc = proto_schema::request_type(uri).expect("schema resolves");
         let frame = |n: &str| {
-            protobuf::encode_grpc_frame(
-                &proto_schema::encode_message_text(&desc, &[n]).unwrap(),
-            )
+            protobuf::encode_grpc_frame(&proto_schema::encode_message_text(&desc, &[n]).unwrap())
         };
         let mut body = frame("1 user_id int: 1");
         body.extend_from_slice(&frame("1 user_id int: 2"));
@@ -230,9 +229,18 @@ mod tests {
 
         // Both frames decode, separated by the `---` marker.
         let lines = request_to_lines(&req);
-        assert!(lines.iter().any(|l| l == "---"), "expected separator: {lines:?}");
-        assert!(lines.iter().any(|l| l.contains("user_id int: 1")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("user_id int: 2")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l == "---"),
+            "expected separator: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("user_id int: 1")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("user_id int: 2")),
+            "{lines:?}"
+        );
 
         // And the two-frame body round-trips byte-for-byte.
         let rebuilt = lines_to_request(&lines, &req);

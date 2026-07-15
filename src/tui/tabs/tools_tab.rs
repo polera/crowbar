@@ -1,25 +1,18 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::{App, ToolsMode};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(0),
-    ])
-    .split(area);
+    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
 
     render_mode_selector(app, frame, chunks[0]);
 
-    let panes = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(chunks[1]);
+    let panes = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[1]);
 
     render_input(app, frame, panes[0]);
     render_output(app, frame, panes[1]);
@@ -73,7 +66,9 @@ fn render_input(app: &App, frame: &mut Frame, area: Rect) {
 
     let mut lines: Vec<Line> = app.tools.editor.render_lines(app.tools.editing);
 
-    if lines.is_empty() || (lines.len() == 1 && app.tools.editor.lines[0].is_empty() && !app.tools.editing) {
+    if lines.is_empty()
+        || (lines.len() == 1 && app.tools.editor.lines[0].is_empty() && !app.tools.editing)
+    {
         lines = vec![Line::styled(
             "Press 'e' to edit input",
             Style::default().fg(Color::DarkGray),
@@ -105,11 +100,7 @@ fn render_output(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let widget = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Output "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Output "))
         .wrap(Wrap { trim: false })
         .scroll((app.tools.scroll, 0));
 

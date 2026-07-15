@@ -14,7 +14,13 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Proxy, Tab::History, Tab::Repeater, Tab::Rules, Tab::Tools];
+    pub const ALL: [Tab; 5] = [
+        Tab::Proxy,
+        Tab::History,
+        Tab::Repeater,
+        Tab::Rules,
+        Tab::Tools,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {

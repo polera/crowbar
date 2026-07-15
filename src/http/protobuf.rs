@@ -170,22 +170,28 @@ fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
 
 fn interpret_length_delimited(data: &[u8], depth: usize) -> ProtoValue {
     if let Ok(s) = std::str::from_utf8(data)
-        && !s.is_empty() && is_likely_text(s) {
-            return ProtoValue::String(s.to_string());
-        }
+        && !s.is_empty()
+        && is_likely_text(s)
+    {
+        return ProtoValue::String(s.to_string());
+    }
 
     if data.len() >= 2
         && let Some(fields) = decode_raw_inner(data, depth + 1)
-            && fields.iter().all(|f| f.number < 1000) {
-                return ProtoValue::Message(fields);
-            }
+        && fields.iter().all(|f| f.number < 1000)
+    {
+        return ProtoValue::Message(fields);
+    }
 
     ProtoValue::Bytes(data.to_vec())
 }
 
 fn is_likely_text(s: &str) -> bool {
     let (total, printable) = s.chars().fold((0usize, 0usize), |(t, p), c| {
-        (t + 1, p + usize::from(c.is_ascii_graphic() || c.is_ascii_whitespace()))
+        (
+            t + 1,
+            p + usize::from(c.is_ascii_graphic() || c.is_ascii_whitespace()),
+        )
     });
     total > 0 && (printable * 100 / total) >= 90
 }
@@ -217,17 +223,26 @@ pub fn format_proto_text(fields: &[ProtoField], indent: usize) -> Vec<String> {
                 lines.push(format!("{}{} int: {}", prefix, field.number, v));
             }
             ProtoValue::Fixed64(v) => {
-                lines.push(format!("{}{} f64: {}", prefix, field.number, format_fixed64(*v)));
+                lines.push(format!(
+                    "{}{} f64: {}",
+                    prefix,
+                    field.number,
+                    format_fixed64(*v)
+                ));
             }
             ProtoValue::Fixed32(v) => {
-                lines.push(format!("{}{} f32: {}", prefix, field.number, format_fixed32(*v)));
+                lines.push(format!(
+                    "{}{} f32: {}",
+                    prefix,
+                    field.number,
+                    format_fixed32(*v)
+                ));
             }
             ProtoValue::String(s) => {
                 lines.push(format!("{}{} str: {}", prefix, field.number, s));
             }
             ProtoValue::Bytes(b) => {
-                let hex: String =
-                    b.iter().map(|byte| format!("{:02x}", byte)).collect();
+                let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
                 lines.push(format!("{}{} hex: {}", prefix, field.number, hex));
             }
             ProtoValue::Message(sub_fields) => {
@@ -248,11 +263,7 @@ pub fn parse_proto_text(lines: &[&str]) -> Option<Vec<ProtoField>> {
     Some(fields)
 }
 
-fn parse_proto_at_depth(
-    lines: &[&str],
-    pos: &mut usize,
-    depth: usize,
-) -> Option<Vec<ProtoField>> {
+fn parse_proto_at_depth(lines: &[&str], pos: &mut usize, depth: usize) -> Option<Vec<ProtoField>> {
     let mut fields = Vec::new();
 
     while *pos < lines.len() {
@@ -482,8 +493,14 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip() {
         let original = vec![
-            ProtoField { number: 1, value: ProtoValue::Varint(150) },
-            ProtoField { number: 2, value: ProtoValue::String("testing".into()) },
+            ProtoField {
+                number: 1,
+                value: ProtoValue::Varint(150),
+            },
+            ProtoField {
+                number: 2,
+                value: ProtoValue::String("testing".into()),
+            },
         ];
         let encoded = encode_raw(&original);
         let decoded = decode_raw(&encoded).unwrap();
@@ -495,14 +512,24 @@ mod tests {
     #[test]
     fn text_format_roundtrip() {
         let fields = vec![
-            ProtoField { number: 1, value: ProtoValue::Varint(42) },
-            ProtoField { number: 2, value: ProtoValue::String("hello".into()) },
-            ProtoField { number: 3, value: ProtoValue::Bytes(vec![0xde, 0xad]) },
+            ProtoField {
+                number: 1,
+                value: ProtoValue::Varint(42),
+            },
+            ProtoField {
+                number: 2,
+                value: ProtoValue::String("hello".into()),
+            },
+            ProtoField {
+                number: 3,
+                value: ProtoValue::Bytes(vec![0xde, 0xad]),
+            },
             ProtoField {
                 number: 4,
-                value: ProtoValue::Message(vec![
-                    ProtoField { number: 1, value: ProtoValue::Varint(99) },
-                ]),
+                value: ProtoValue::Message(vec![ProtoField {
+                    number: 1,
+                    value: ProtoValue::Varint(99),
+                }]),
             },
         ];
         let text = format_proto_text(&fields, 0);
@@ -515,9 +542,10 @@ mod tests {
 
     #[test]
     fn grpc_frame_encode_roundtrip() {
-        let payload = encode_raw(&[
-            ProtoField { number: 1, value: ProtoValue::Varint(150) },
-        ]);
+        let payload = encode_raw(&[ProtoField {
+            number: 1,
+            value: ProtoValue::Varint(150),
+        }]);
         let frame = encode_grpc_frame(&payload);
         let messages = decode_grpc_body(&frame);
         assert_eq!(messages.len(), 1);

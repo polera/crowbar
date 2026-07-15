@@ -1,17 +1,16 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
-use ratatui::Frame;
 
 use crate::editor::EditorMode;
-use crate::http::models::EntryState;
+use crate::tui::tabs::Tab;
 use crate::tui::tabs::history_tab;
 use crate::tui::tabs::proxy_tab;
 use crate::tui::tabs::repeater_tab;
 use crate::tui::tabs::rules_tab;
 use crate::tui::tabs::tools_tab;
-use crate::tui::tabs::Tab;
 
 use super::App;
 
@@ -64,9 +63,7 @@ impl App {
                 if *tab == Tab::Proxy && !self.intercept_ui.queue.is_empty() {
                     spans.push(Span::styled(
                         format!(" ({})", self.intercept_ui.queue.len()),
-                        Style::default()
-                            .fg(Color::Red)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ));
                 }
 
@@ -81,7 +78,11 @@ impl App {
 
         let version = env!("CARGO_PKG_VERSION");
         let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::ALL).title(format!(" crowbar v{version} ")))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" crowbar v{version} ")),
+            )
             .select(selected)
             .highlight_style(
                 Style::default()
@@ -104,23 +105,18 @@ impl App {
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
         if let Some((msg, when)) = &self.status_message
-            && when.elapsed() < std::time::Duration::from_secs(3) {
-                let line = Line::from(Span::styled(
-                    format!(" {} ", msg),
-                    Style::default().fg(Color::Yellow),
-                ));
-                frame.render_widget(Paragraph::new(line), area);
-                return;
-            }
+            && when.elapsed() < std::time::Duration::from_secs(3)
+        {
+            let line = Line::from(Span::styled(
+                format!(" {} ", msg),
+                Style::default().fg(Color::Yellow),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
 
         let total = self.store.len();
-        let (complete, errors) = self.store.entries().iter().fold((0, 0), |(c, e), entry| {
-            match entry.state {
-                EntryState::Complete => (c + 1, e),
-                EntryState::Error => (c, e + 1),
-                _ => (c, e),
-            }
-        });
+        let (complete, errors) = self.store.state_counts();
 
         let intercept_span = if !self.proxy_running {
             Span::styled(
@@ -150,7 +146,8 @@ impl App {
         };
 
         let editor_mode_span = if self.editor_mode == EditorMode::Vim {
-            let active_editing = self.tools.editing || self.intercept_ui.editing || self.repeater.editing;
+            let active_editing =
+                self.tools.editing || self.intercept_ui.editing || self.repeater.editing;
             if active_editing {
                 let editor = if self.tools.editing {
                     &self.tools.editor
@@ -213,9 +210,13 @@ impl App {
         let y = (area.height.saturating_sub(height)) / 2;
         let popup = Rect::new(x, y, width, height);
 
-        let key = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let key = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         let dim = Style::default().fg(Color::DarkGray);
-        let section = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let section = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
         let path_style = Style::default().fg(Color::Green);
 
         let cert_path = dirs::home_dir()
@@ -250,9 +251,7 @@ impl App {
                     cert_display
                 )),
             ]),
-            Line::from(Span::raw(
-                "            && sudo update-ca-certificates",
-            )),
+            Line::from(Span::raw("            && sudo update-ca-certificates")),
             Line::raw(""),
             Line::from(vec![
                 Span::styled("  Firefox:", key),
@@ -318,10 +317,7 @@ impl App {
                 Span::styled(&self.save_buffer, Style::default().fg(Color::White)),
                 Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
             ]),
-            Line::from(Span::styled(
-                "  Enter to save, Esc to cancel",
-                dim,
-            )),
+            Line::from(Span::styled("  Enter to save, Esc to cancel", dim)),
         ];
 
         frame.render_widget(Clear, popup);
@@ -346,7 +342,9 @@ impl App {
         let y = (area.height.saturating_sub(height)) / 2;
         let popup = Rect::new(x, y, width, height);
 
-        let key = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let key = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         let dim = Style::default().fg(Color::DarkGray);
 
         let mut lines = vec![Line::raw("")];
@@ -399,70 +397,212 @@ impl App {
         let y = (area.height.saturating_sub(height)) / 2;
         let popup = Rect::new(x, y, width, height);
 
-        let key = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let key = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         let dim = Style::default().fg(Color::DarkGray);
-        let section = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let section = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
 
         let lines = vec![
             Line::from(Span::styled("Global", section)),
-            Line::from(vec![Span::styled("  Tab/Shift+Tab  ", key), Span::raw("Cycle tabs")]),
-            Line::from(vec![Span::styled("  1-5            ", key), Span::raw("Proxy/History/Repeater/Rules/Tools")]),
-            Line::from(vec![Span::styled("  ?              ", key), Span::raw("Toggle this help")]),
-            Line::from(vec![Span::styled("  Ctrl+S         ", key), Span::raw("Save session")]),
-            Line::from(vec![Span::styled("  q / Ctrl+C     ", key), Span::raw("Quit")]),
+            Line::from(vec![
+                Span::styled("  Tab/Shift+Tab  ", key),
+                Span::raw("Cycle tabs"),
+            ]),
+            Line::from(vec![
+                Span::styled("  1-5            ", key),
+                Span::raw("Proxy/History/Repeater/Rules/Tools"),
+            ]),
+            Line::from(vec![
+                Span::styled("  ?              ", key),
+                Span::raw("Toggle this help"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Ctrl+S         ", key),
+                Span::raw("Save session"),
+            ]),
+            Line::from(vec![
+                Span::styled("  q / Ctrl+C     ", key),
+                Span::raw("Quit"),
+            ]),
             Line::raw(""),
             Line::from(Span::styled("Proxy (Intercept)", section)),
-            Line::from(vec![Span::styled("  i              ", key), Span::raw("Toggle intercept on/off")]),
-            Line::from(vec![Span::styled("  f              ", key), Span::raw("Forward intercepted request")]),
-            Line::from(vec![Span::styled("  d              ", key), Span::raw("Drop intercepted request")]),
-            Line::from(vec![Span::styled("  e              ", key), Span::raw("Edit intercepted request")]),
-            Line::from(vec![Span::styled("  b              ", key), Span::raw("Change bind address")]),
-            Line::from(vec![Span::styled("  s              ", key), Span::raw("Edit scope patterns")]),
-            Line::from(vec![Span::styled("  C              ", key), Span::raw("Export CA certificate")]),
-            Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Scroll request")]),
+            Line::from(vec![
+                Span::styled("  i              ", key),
+                Span::raw("Toggle intercept on/off"),
+            ]),
+            Line::from(vec![
+                Span::styled("  f              ", key),
+                Span::raw("Forward intercepted request"),
+            ]),
+            Line::from(vec![
+                Span::styled("  d              ", key),
+                Span::raw("Drop intercepted request"),
+            ]),
+            Line::from(vec![
+                Span::styled("  e              ", key),
+                Span::raw("Edit intercepted request"),
+            ]),
+            Line::from(vec![
+                Span::styled("  b              ", key),
+                Span::raw("Change bind address"),
+            ]),
+            Line::from(vec![
+                Span::styled("  s              ", key),
+                Span::raw("Edit scope patterns"),
+            ]),
+            Line::from(vec![
+                Span::styled("  C              ", key),
+                Span::raw("Export CA certificate"),
+            ]),
+            Line::from(vec![
+                Span::styled("  j/k            ", key),
+                Span::raw("Scroll request"),
+            ]),
             Line::raw(""),
             Line::from(Span::styled("History", section)),
-            Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Navigate / scroll")]),
-            Line::from(vec![Span::styled("  g/G            ", key), Span::raw("Jump to first / last")]),
-            Line::from(vec![Span::styled("  /              ", key), Span::raw("Filter by host, path, method, status")]),
-            Line::from(vec![Span::styled("  Enter          ", key), Span::raw("Toggle detail view")]),
-            Line::from(vec![Span::styled("  r              ", key), Span::raw("Send to repeater")]),
-            Line::from(vec![Span::styled("  m              ", key), Span::raw("Add to macro sequence")]),
-            Line::from(vec![Span::styled("  c              ", key), Span::raw("Export as curl")]),
-            Line::from(vec![Span::styled("  w              ", key), Span::raw("Export as raw HTTP")]),
-            Line::from(vec![Span::styled("  h              ", key), Span::raw("Export all as HAR")]),
+            Line::from(vec![
+                Span::styled("  j/k            ", key),
+                Span::raw("Navigate / scroll"),
+            ]),
+            Line::from(vec![
+                Span::styled("  g/G            ", key),
+                Span::raw("Jump to first / last"),
+            ]),
+            Line::from(vec![
+                Span::styled("  /              ", key),
+                Span::raw("Filter by host, path, method, status"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Enter          ", key),
+                Span::raw("Toggle detail view"),
+            ]),
+            Line::from(vec![
+                Span::styled("  r              ", key),
+                Span::raw("Send to repeater"),
+            ]),
+            Line::from(vec![
+                Span::styled("  m              ", key),
+                Span::raw("Add to macro sequence"),
+            ]),
+            Line::from(vec![
+                Span::styled("  c              ", key),
+                Span::raw("Export as curl"),
+            ]),
+            Line::from(vec![
+                Span::styled("  w              ", key),
+                Span::raw("Export as raw HTTP"),
+            ]),
+            Line::from(vec![
+                Span::styled("  h              ", key),
+                Span::raw("Export all as HAR"),
+            ]),
             Line::raw(""),
             Line::from(Span::styled("Repeater", section)),
-            Line::from(vec![Span::styled("  Ctrl+Enter     ", key), Span::raw("Send request")]),
-            Line::from(vec![Span::styled("  e              ", key), Span::raw("Edit request")]),
-            Line::from(vec![Span::styled("  d              ", key), Span::raw("Toggle diff view")]),
-            Line::from(vec![Span::styled("  M              ", key), Span::raw("Toggle macro view")]),
-            Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Scroll request")]),
-            Line::from(vec![Span::styled("  J/K            ", key), Span::raw("Scroll response")]),
+            Line::from(vec![
+                Span::styled("  Ctrl+Enter     ", key),
+                Span::raw("Send request"),
+            ]),
+            Line::from(vec![
+                Span::styled("  e              ", key),
+                Span::raw("Edit request"),
+            ]),
+            Line::from(vec![
+                Span::styled("  d              ", key),
+                Span::raw("Toggle diff view"),
+            ]),
+            Line::from(vec![
+                Span::styled("  M              ", key),
+                Span::raw("Toggle macro view"),
+            ]),
+            Line::from(vec![
+                Span::styled("  j/k            ", key),
+                Span::raw("Scroll request"),
+            ]),
+            Line::from(vec![
+                Span::styled("  J/K            ", key),
+                Span::raw("Scroll response"),
+            ]),
             Line::raw(""),
             Line::from(Span::styled("Rules", section)),
-            Line::from(vec![Span::styled("  a              ", key), Span::raw("Add rule")]),
-            Line::from(vec![Span::styled("  x              ", key), Span::raw("Delete rule")]),
-            Line::from(vec![Span::styled("  Enter          ", key), Span::raw("Toggle enabled")]),
-            Line::from(vec![Span::styled("  n/p/e          ", key), Span::raw("Edit name / pattern / replacement")]),
-            Line::from(vec![Span::styled("  t/s/R          ", key), Span::raw("Cycle target / scope / regex")]),
+            Line::from(vec![
+                Span::styled("  a              ", key),
+                Span::raw("Add rule"),
+            ]),
+            Line::from(vec![
+                Span::styled("  x              ", key),
+                Span::raw("Delete rule"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Enter          ", key),
+                Span::raw("Toggle enabled"),
+            ]),
+            Line::from(vec![
+                Span::styled("  n/p/e          ", key),
+                Span::raw("Edit name / pattern / replacement"),
+            ]),
+            Line::from(vec![
+                Span::styled("  t/s/R          ", key),
+                Span::raw("Cycle target / scope / regex"),
+            ]),
             Line::raw(""),
             Line::from(Span::styled("Tools", section)),
-            Line::from(vec![Span::styled("  h/l            ", key), Span::raw("Switch tool")]),
-            Line::from(vec![Span::styled("  e              ", key), Span::raw("Edit input")]),
-            Line::from(vec![Span::styled("  j/k            ", key), Span::raw("Scroll output")]),
-            Line::from(vec![Span::styled("  Ctrl+U         ", key), Span::raw("Clear input")]),
-            Line::from(vec![Span::styled("  Ctrl+Y         ", key), Span::raw("Copy output to clipboard")]),
+            Line::from(vec![
+                Span::styled("  h/l            ", key),
+                Span::raw("Switch tool"),
+            ]),
+            Line::from(vec![
+                Span::styled("  e              ", key),
+                Span::raw("Edit input"),
+            ]),
+            Line::from(vec![
+                Span::styled("  j/k            ", key),
+                Span::raw("Scroll output"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Ctrl+U         ", key),
+                Span::raw("Clear input"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Ctrl+Y         ", key),
+                Span::raw("Copy output to clipboard"),
+            ]),
             Line::raw(""),
             Line::from(Span::styled("Editor", section)),
-            Line::from(vec![Span::styled("  F2             ", key), Span::raw("Toggle vim/default mode")]),
-            Line::from(vec![Span::styled("  Ctrl+Home/End  ", key), Span::raw("Jump to start/end of input")]),
-            Line::from(vec![Span::styled("  Vim: Esc       ", key), Span::raw("Normal mode / exit edit")]),
-            Line::from(vec![Span::styled("  Vim: i/a/o     ", key), Span::raw("Enter insert mode")]),
-            Line::from(vec![Span::styled("  Vim: hjkl      ", key), Span::raw("Movement (normal mode)")]),
-            Line::from(vec![Span::styled("  Vim: gg/G      ", key), Span::raw("Jump to start/end of input")]),
-            Line::from(vec![Span::styled("  Vim: w/b       ", key), Span::raw("Word forward/backward")]),
-            Line::from(vec![Span::styled("  Vim: dd/x/u    ", key), Span::raw("Delete line/char, undo")]),
+            Line::from(vec![
+                Span::styled("  F2             ", key),
+                Span::raw("Toggle vim/default mode"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Ctrl+Home/End  ", key),
+                Span::raw("Jump to start/end of input"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Vim: Esc       ", key),
+                Span::raw("Normal mode / exit edit"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Vim: i/a/o     ", key),
+                Span::raw("Enter insert mode"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Vim: hjkl      ", key),
+                Span::raw("Movement (normal mode)"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Vim: gg/G      ", key),
+                Span::raw("Jump to start/end of input"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Vim: w/b       ", key),
+                Span::raw("Word forward/backward"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Vim: dd/x/u    ", key),
+                Span::raw("Delete line/char, undo"),
+            ]),
             Line::raw(""),
             Line::from(Span::styled("Press any key to close", dim)),
         ];

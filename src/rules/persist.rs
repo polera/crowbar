@@ -36,7 +36,7 @@ pub fn rules_dir() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?
         .join(".crowbar")
         .join("rules");
-    std::fs::create_dir_all(&dir)?;
+    crate::fs_security::ensure_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -44,15 +44,23 @@ pub fn save(rules: &[Rule], name: &str) -> anyhow::Result<PathBuf> {
     let dir = rules_dir()?;
     let path = dir.join(format!("{}.json", safe_name(name)?));
     let file = RulesFile::from_rules(rules);
-    let json = serde_json::to_string_pretty(&file)?;
-    std::fs::write(&path, json)?;
+    write_rules_file(&path, &file)?;
     Ok(path)
 }
 
 pub fn save_to(rules: &[Rule], path: &Path) -> anyhow::Result<()> {
     let file = RulesFile::from_rules(rules);
-    let json = serde_json::to_string_pretty(&file)?;
-    std::fs::write(path, json)?;
+    write_rules_file(path, &file)?;
+    Ok(())
+}
+
+fn write_rules_file(path: &Path, rules: &RulesFile) -> anyhow::Result<()> {
+    crate::fs_security::write_private_with(path, |file| {
+        use std::io::Write;
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, rules).map_err(std::io::Error::other)?;
+        writer.flush()
+    })?;
     Ok(())
 }
 

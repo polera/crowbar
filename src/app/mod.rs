@@ -78,7 +78,7 @@ pub struct App {
     pub bind_addr: SocketAddr,
     pub intercept_state: Arc<InterceptState>,
     pub scope: Arc<Scope>,
-    pub ui_tx: mpsc::UnboundedSender<ProxyToUi>,
+    pub ui_tx: mpsc::Sender<ProxyToUi>,
 
     pub history: HistoryState,
     pub intercept_ui: InterceptUiState,
@@ -92,6 +92,8 @@ pub struct App {
     pub rules: SharedRules,
     pub editor_mode: EditorMode,
     pub proxy_running: bool,
+    pub allow_remote: bool,
+    pub proxy_limits: crate::proxy::ProxyLimits,
 
     // Bind address editing
     pub editing_bind_addr: bool,
@@ -114,6 +116,18 @@ pub struct App {
 
     // Quit confirmation
     pub show_quit_confirm: bool,
+}
+
+pub struct AppInit {
+    pub bind_addr: SocketAddr,
+    pub intercept_state: Arc<InterceptState>,
+    pub scope: Arc<Scope>,
+    pub rules: SharedRules,
+    pub ui_tx: mpsc::Sender<ProxyToUi>,
+    pub editor_mode: EditorMode,
+    pub allow_remote: bool,
+    pub proxy_limits: crate::proxy::ProxyLimits,
+    pub max_history_entries: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,18 +173,22 @@ impl ToolsMode {
 }
 
 impl App {
-    pub fn new(
-        bind_addr: SocketAddr,
-        intercept_state: Arc<InterceptState>,
-        scope: Arc<Scope>,
-        rules: SharedRules,
-        ui_tx: mpsc::UnboundedSender<ProxyToUi>,
-        editor_mode: EditorMode,
-    ) -> Self {
+    pub fn new(init: AppInit) -> Self {
+        let AppInit {
+            bind_addr,
+            intercept_state,
+            scope,
+            rules,
+            ui_tx,
+            editor_mode,
+            allow_remote,
+            proxy_limits,
+            max_history_entries,
+        } = init;
         Self {
             active_tab: Tab::History,
             should_quit: false,
-            store: InMemoryStore::new(),
+            store: InMemoryStore::new(max_history_entries),
             bind_addr,
             intercept_state,
             scope,
@@ -224,6 +242,8 @@ impl App {
             },
             editor_mode,
             proxy_running: true,
+            allow_remote,
+            proxy_limits,
             editing_bind_addr: false,
             bind_addr_buffer: String::new(),
             pending_rebind: None,
@@ -242,7 +262,6 @@ impl App {
     pub fn intercept_enabled(&self) -> bool {
         self.intercept_state.is_enabled()
     }
-
 }
 
 pub(super) enum EditorTarget {
@@ -256,4 +275,3 @@ pub enum RuleField {
     Pattern,
     Replacement,
 }
-

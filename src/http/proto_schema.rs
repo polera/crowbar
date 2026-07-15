@@ -178,7 +178,13 @@ fn render_singular(fd: &FieldDescriptor, value: &Value, indent: usize, out: &mut
                 .get_value(n)
                 .map(|v| v.name().to_string())
                 .unwrap_or_else(|| n.to_string());
-            out.push(format!("{}{} {} enum: {}", prefix, fd.number(), fd.name(), name));
+            out.push(format!(
+                "{}{} {} enum: {}",
+                prefix,
+                fd.number(),
+                fd.name(),
+                name
+            ));
         }
         kind => {
             out.push(format!(
@@ -207,10 +213,8 @@ fn render_map_entries(
     };
     let prefix = pad(indent);
     // Sort entries by key text for deterministic output.
-    let mut pairs: Vec<(String, &Value)> = entries
-        .iter()
-        .map(|(k, v)| (mapkey_repr(k), v))
-        .collect();
+    let mut pairs: Vec<(String, &Value)> =
+        entries.iter().map(|(k, v)| (mapkey_repr(k), v)).collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     for (key, value) in pairs {
         match val_fd.kind() {
@@ -497,7 +501,9 @@ mod tests {
     }
 
     fn user_msg() -> MessageDescriptor {
-        pool().get_message_by_name("sample.User").expect("User type")
+        pool()
+            .get_message_by_name("sample.User")
+            .expect("User type")
     }
 
     /// Encode `msg`, decode to text, re-encode the text, and assert the two
@@ -635,9 +641,7 @@ mod tests {
                 "double_val" => msg.set_field(&f, Value::F64(2.25)),
                 "uint32_val" => msg.set_field(&f, Value::U32(123)),
                 "uint64_val" => msg.set_field(&f, Value::U64(456)),
-                "bytes_val" => {
-                    msg.set_field(&f, Value::Bytes(vec![0xde, 0xad, 0xbe, 0xef].into()))
-                }
+                "bytes_val" => msg.set_field(&f, Value::Bytes(vec![0xde, 0xad, 0xbe, 0xef].into())),
                 _ => {}
             }
         }
@@ -648,9 +652,18 @@ mod tests {
         // Tags must reflect the schema's wire type, and signed/zigzag values
         // must survive — exactly what the heuristic decoder cannot do.
         assert!(text.contains("sint32_val sint: -7"), "got:\n{text}");
-        assert!(text.contains("sint64_val sint: -9000000000"), "got:\n{text}");
-        assert!(text.contains("fixed32_val fixed: 4294967295"), "got:\n{text}");
-        assert!(text.contains("sfixed32_val sfixed: -2147483648"), "got:\n{text}");
+        assert!(
+            text.contains("sint64_val sint: -9000000000"),
+            "got:\n{text}"
+        );
+        assert!(
+            text.contains("fixed32_val fixed: 4294967295"),
+            "got:\n{text}"
+        );
+        assert!(
+            text.contains("sfixed32_val sfixed: -2147483648"),
+            "got:\n{text}"
+        );
         assert!(text.contains("float_val f32: 1.5"), "got:\n{text}");
         assert!(text.contains("double_val f64: 2.25"), "got:\n{text}");
         assert!(text.contains("uint32_val uint: 123"), "got:\n{text}");
@@ -670,7 +683,10 @@ mod tests {
     fn unknown_enum_number_renders_as_number() {
         let desc = user_msg();
         let mut msg = DynamicMessage::new(desc.clone());
-        msg.set_field(&desc.get_field_by_name("role").unwrap(), Value::EnumNumber(99));
+        msg.set_field(
+            &desc.get_field_by_name("role").unwrap(),
+            Value::EnumNumber(99),
+        );
         let text = decode_message_text(&desc, &msg.encode_to_vec(), 0)
             .unwrap()
             .join("\n");
@@ -700,9 +716,10 @@ mod tests {
         let reg = ProtoRegistry { pool: pool() };
         assert!(reg.method_for_uri("/sample.UserService/GetUser").is_some());
         // Full URL with a query string.
-        assert!(reg
-            .method_for_uri("https://h/sample.UserService/GetUser?x=1")
-            .is_some());
+        assert!(
+            reg.method_for_uri("https://h/sample.UserService/GetUser?x=1")
+                .is_some()
+        );
         // Unknown method on a known service.
         assert!(reg.method_for_uri("/sample.UserService/Nope").is_none());
         // Missing the method segment entirely.
@@ -714,7 +731,10 @@ mod tests {
         let dir: PathBuf = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proto").into();
         let mut files = Vec::new();
         collect_protos(&dir, &mut files).unwrap();
-        assert!(files.iter().any(|p| p.ends_with("sample.proto")), "files: {files:?}");
+        assert!(
+            files.iter().any(|p| p.ends_with("sample.proto")),
+            "files: {files:?}"
+        );
         assert!(
             files.iter().any(|p| p.ends_with("nested/extra.proto")),
             "recursion missed nested dir; files: {files:?}"
@@ -729,7 +749,8 @@ mod tests {
             concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proto_common").into();
 
         // With the extra include root, the cross-dir import resolves.
-        let pool = build_pool(&[importer.clone()], &[common]).expect("compile with include");
+        let pool =
+            build_pool(std::slice::from_ref(&importer), &[common]).expect("compile with include");
         assert!(pool.get_message_by_name("importer.Wrapper").is_some());
         assert!(pool.get_message_by_name("common.Common").is_some());
 

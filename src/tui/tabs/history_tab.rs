@@ -1,8 +1,11 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap};
-use ratatui::Frame;
+use ratatui::widgets::{
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    TableState, Wrap,
+};
 
 use crate::app::App;
 use crate::http::models::EntryState;
@@ -12,9 +15,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let filtered = app.store.filtered_entries_all();
 
     if app.store.is_empty() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" History ");
+        let block = Block::default().borders(Borders::ALL).title(" History ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
         logo::render(frame, inner);
@@ -24,11 +25,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let has_filter = !app.history.filter.is_empty() || app.history.filtering;
 
     let (filter_area, content_area) = if has_filter {
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(area);
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
         (Some(chunks[0]), chunks[1])
     } else {
         (None, area)
@@ -45,10 +42,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         let has_findings = selected.is_some_and(|e| !e.findings.is_empty());
 
         if has_ws || has_grpc || has_findings {
-            let mut constraints = vec![
-                Constraint::Percentage(25),
-                Constraint::Percentage(35),
-            ];
+            let mut constraints = vec![Constraint::Percentage(25), Constraint::Percentage(35)];
             let extra_panes = has_ws as usize + has_grpc as usize + has_findings as usize;
             let remaining = 40u16 / extra_panes as u16;
             for _ in 0..extra_panes {
@@ -72,11 +66,8 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
                 render_grpc_messages(app, &filtered, frame, chunks[pane_idx]);
             }
         } else {
-            let chunks = Layout::vertical([
-                Constraint::Percentage(40),
-                Constraint::Percentage(60),
-            ])
-            .split(content_area);
+            let chunks = Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .split(content_area);
 
             render_table_filtered(app, &filtered, frame, chunks[0]);
             render_detail_filtered(app, &filtered, frame, chunks[1]);
@@ -103,7 +94,12 @@ fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect, match_count: usiz
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+fn render_table_filtered(
+    app: &App,
+    filtered: &[&crate::http::models::HistoryEntry],
+    frame: &mut Frame,
+    area: Rect,
+) {
     let header = Row::new(vec![
         Cell::from("#"),
         Cell::from("Method"),
@@ -113,7 +109,11 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
         Cell::from("Size"),
         Cell::from("Time"),
     ])
-    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
     .height(1);
 
     let visible_height = area.height.saturating_sub(3) as usize;
@@ -137,7 +137,11 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
                 &req.uri
             };
             let path = if path.chars().count() > 50 {
-                let end = path.char_indices().nth(47).map(|(i, _)| i).unwrap_or(path.len());
+                let end = path
+                    .char_indices()
+                    .nth(47)
+                    .map(|(i, _)| i)
+                    .unwrap_or(path.len());
                 format!("{}...", &path[..end])
             } else {
                 path.to_string()
@@ -243,17 +247,19 @@ fn render_table_filtered(app: &App, filtered: &[&crate::http::models::HistoryEnt
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+fn render_detail_filtered(
+    app: &App,
+    filtered: &[&crate::http::models::HistoryEntry],
+    frame: &mut Frame,
+    area: Rect,
+) {
     let entry = match filtered.get(app.history.selected) {
         Some(e) => e,
         None => return,
     };
 
-    let chunks = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(area);
+    let chunks =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
 
     // Request pane
     let mut req_lines: Vec<Line> = Vec::new();
@@ -275,7 +281,9 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
 
     if !req.body.is_empty() {
         req_lines.push(Line::raw(""));
-        let content_type = req.headers.iter()
+        let content_type = req
+            .headers
+            .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.as_str());
         let proto_type = if req.is_grpc {
@@ -284,16 +292,15 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
             None
         };
         req_lines.extend(body_view::body_lines_with_schema(
-            &req.body, content_type, 100, proto_type.as_ref(),
+            &req.body,
+            content_type,
+            100,
+            proto_type.as_ref(),
         ));
     }
 
     let req_paragraph = Paragraph::new(Text::from(req_lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Request "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Request "))
         .wrap(Wrap { trim: false })
         .scroll((app.history.scroll, 0));
 
@@ -329,25 +336,27 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
             ]));
 
             if entry.request.is_grpc
-                && let Some((code, name)) = resp.grpc_status() {
-                    let grpc_style = if code == 0 {
-                        Style::default().fg(Color::Green).bold()
-                    } else {
-                        Style::default().fg(Color::Red).bold()
-                    };
-                    let mut grpc_spans = vec![
-                        Span::styled("gRPC ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("{} {}", code, name), grpc_style),
-                    ];
-                    if let Some(msg) = resp.grpc_message()
-                        && !msg.is_empty() {
-                            grpc_spans.push(Span::styled(
-                                format!("  {}", msg),
-                                Style::default().fg(Color::Yellow),
-                            ));
-                        }
-                    resp_lines.push(Line::from(grpc_spans));
+                && let Some((code, name)) = resp.grpc_status()
+            {
+                let grpc_style = if code == 0 {
+                    Style::default().fg(Color::Green).bold()
+                } else {
+                    Style::default().fg(Color::Red).bold()
+                };
+                let mut grpc_spans = vec![
+                    Span::styled("gRPC ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{} {}", code, name), grpc_style),
+                ];
+                if let Some(msg) = resp.grpc_message()
+                    && !msg.is_empty()
+                {
+                    grpc_spans.push(Span::styled(
+                        format!("  {}", msg),
+                        Style::default().fg(Color::Yellow),
+                    ));
                 }
+                resp_lines.push(Line::from(grpc_spans));
+            }
 
             if let Some(timing) = &resp.timing {
                 resp_lines.push(Line::raw(""));
@@ -360,7 +369,9 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
 
             if !resp.body.is_empty() {
                 resp_lines.push(Line::raw(""));
-                let content_type = resp.headers.iter()
+                let content_type = resp
+                    .headers
+                    .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.as_str());
                 let proto_type = if entry.request.is_grpc {
@@ -369,7 +380,10 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
                     None
                 };
                 resp_lines.extend(body_view::body_lines_with_schema(
-                    &resp.body, content_type, 200, proto_type.as_ref(),
+                    &resp.body,
+                    content_type,
+                    200,
+                    proto_type.as_ref(),
                 ));
             }
 
@@ -381,16 +395,10 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
             let msg = match entry.state {
                 EntryState::Pending => "Awaiting response...",
                 EntryState::Dropped => "Request was dropped",
-                EntryState::Error => entry
-                    .error_message
-                    .as_deref()
-                    .unwrap_or("Unknown error"),
+                EntryState::Error => entry.error_message.as_deref().unwrap_or("Unknown error"),
                 EntryState::Complete => "No response data",
             };
-            resp_lines.push(Line::styled(
-                msg,
-                Style::default().fg(Color::DarkGray),
-            ));
+            resp_lines.push(Line::styled(msg, Style::default().fg(Color::DarkGray)));
         }
     }
 
@@ -398,29 +406,26 @@ fn render_detail_filtered(app: &App, filtered: &[&crate::http::models::HistoryEn
     let visible_height = chunks[1].height.saturating_sub(2);
 
     let resp_paragraph = Paragraph::new(Text::from(resp_lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Response "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Response "))
         .wrap(Wrap { trim: false })
         .scroll((app.history.scroll, 0));
 
     frame.render_widget(resp_paragraph, chunks[1]);
 
     if content_height > visible_height {
-        let mut scrollbar_state = ScrollbarState::new(content_height as usize)
-            .position(app.history.scroll as usize);
+        let mut scrollbar_state =
+            ScrollbarState::new(content_height as usize).position(app.history.scroll as usize);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-        frame.render_stateful_widget(
-            scrollbar,
-            chunks[1],
-            &mut scrollbar_state,
-        );
+        frame.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
     }
 }
 
-fn render_findings(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+fn render_findings(
+    app: &App,
+    filtered: &[&crate::http::models::HistoryEntry],
+    frame: &mut Frame,
+    area: Rect,
+) {
     let entry = match filtered.get(app.history.selected) {
         Some(e) => e,
         None => return,
@@ -442,7 +447,10 @@ fn render_findings(app: &App, filtered: &[&crate::http::models::HistoryEntry], f
                 format!(" [{:>4}] ", finding.severity.label()),
                 severity_style,
             ),
-            Span::styled(&finding.title, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &finding.title,
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
         ]));
         lines.push(Line::from(vec![
             Span::raw("         "),
@@ -452,18 +460,19 @@ fn render_findings(app: &App, filtered: &[&crate::http::models::HistoryEntry], f
 
     let title = format!(" Findings ({}) ", entry.findings.len());
     let widget = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
         .scroll((app.history.scroll, 0));
 
     frame.render_widget(widget, area);
 }
 
-fn render_ws_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+fn render_ws_messages(
+    app: &App,
+    filtered: &[&crate::http::models::HistoryEntry],
+    frame: &mut Frame,
+    area: Rect,
+) {
     let entry = match filtered.get(app.history.selected) {
         Some(e) => e,
         None => return,
@@ -474,14 +483,8 @@ fn render_ws_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry]
     let mut lines: Vec<Line> = Vec::new();
     for (i, msg) in entry.ws_messages.iter().enumerate() {
         let dir_span = match msg.direction {
-            WsDirection::ClientToServer => Span::styled(
-                ">>> ",
-                Style::default().fg(Color::Green),
-            ),
-            WsDirection::ServerToClient => Span::styled(
-                "<<< ",
-                Style::default().fg(Color::Cyan),
-            ),
+            WsDirection::ClientToServer => Span::styled(">>> ", Style::default().fg(Color::Green)),
+            WsDirection::ServerToClient => Span::styled("<<< ", Style::default().fg(Color::Cyan)),
         };
 
         let type_label = if msg.is_text() {
@@ -525,18 +528,19 @@ fn render_ws_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry]
 
     let title = format!(" WebSocket ({} messages) ", entry.ws_messages.len());
     let widget = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
         .scroll((app.history.scroll, 0));
 
     frame.render_widget(widget, area);
 }
 
-fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntry], frame: &mut Frame, area: Rect) {
+fn render_grpc_messages(
+    app: &App,
+    filtered: &[&crate::http::models::HistoryEntry],
+    frame: &mut Frame,
+    area: Rect,
+) {
     let entry = match filtered.get(app.history.selected) {
         Some(e) => e,
         None => return,
@@ -547,14 +551,10 @@ fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntr
     let mut lines: Vec<Line> = Vec::new();
     for (i, msg) in entry.grpc_messages.iter().enumerate() {
         let dir_span = match msg.direction {
-            GrpcDirection::ClientToServer => Span::styled(
-                ">>> ",
-                Style::default().fg(Color::Green),
-            ),
-            GrpcDirection::ServerToClient => Span::styled(
-                "<<< ",
-                Style::default().fg(Color::Cyan),
-            ),
+            GrpcDirection::ClientToServer => {
+                Span::styled(">>> ", Style::default().fg(Color::Green))
+            }
+            GrpcDirection::ServerToClient => Span::styled("<<< ", Style::default().fg(Color::Cyan)),
         };
 
         let size = format_size(msg.payload.len());
@@ -639,11 +639,7 @@ fn render_grpc_messages(app: &App, filtered: &[&crate::http::models::HistoryEntr
 
     let title = format!(" gRPC Messages ({}) ", entry.grpc_messages.len());
     let widget = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
         .scroll((app.history.scroll, 0));
 

@@ -38,6 +38,8 @@ A terminal-based web security testing proxy built in Rust. Intercept, inspect, a
 - **Editor Modes** — Choose between a standard editor and Vim-style keybindings (with normal/insert modes, motions, and operators); toggle with `F2` or set via config/CLI
 - **Multi-Instance Support** — Run multiple Crowbar instances simultaneously; automatic port selection finds the next available port if the default is occupied
 - **Runtime Reconfiguration** — Change the proxy bind address and scope patterns without restarting
+- **Resource Limits**: Configurable caps on buffered HTTP body size, WebSocket frame size, retained history entries, and concurrent connections, with a non-loopback bind refused unless explicitly opted into via `--allow-remote`
+- **Hardened Local Storage**: CA key material, sessions, rules, and config are written to `~/.crowbar` with private directory/file permissions
 
 ## Supported Platforms
 
@@ -79,8 +81,12 @@ Binaries are placed in `dist/` as `crowbar-<version>-<os>-<arch>`.
 # Start the proxy (default: 127.0.0.1:8080)
 crowbar
 
-# Custom bind address
-crowbar --bind 0.0.0.0:9090
+# Custom loopback bind address
+crowbar --bind 127.0.0.1:9090
+
+# Remote access is an explicit opt-in because the proxy has no authentication.
+# Restrict access with a host firewall or trusted private network.
+crowbar --bind 0.0.0.0:9090 --allow-remote
 
 # Start with intercept enabled
 crowbar --intercept
@@ -102,7 +108,24 @@ crowbar --load ~/.crowbar/sessions/my-session.json
 
 # Use a custom config file
 crowbar --config /path/to/config.toml
+
+# Override resource limits (values are bytes or entry/connection counts)
+crowbar --max-body-bytes 10485760 \
+  --max-ws-frame-bytes 16777216 \
+  --max-history-entries 10000 \
+  --max-connections 128
 ```
+
+Crowbar refuses a non-loopback bind unless `--allow-remote` is passed or
+`allow_remote = true` is set in the configuration file. `--allow-remote` does
+not enable authentication: only expose the listener on a network whose clients
+and outbound access you trust. Scope patterns limit which traffic is captured;
+they are not an access-control or destination policy.
+
+The default resource limits are 10 MiB per buffered HTTP body, 16 MiB per
+WebSocket frame, 10,000 retained history entries, and 128 concurrent client
+connections. Lower these values for an untrusted or memory-constrained
+environment. The resource-limit settings are currently CLI-only.
 
 ### CA Certificate
 
@@ -146,6 +169,7 @@ Optional config at `~/.crowbar/config.toml`:
 
 ```toml
 bind = "127.0.0.1:8080"
+allow_remote = false # required for a non-loopback bind; does not add authentication
 intercept = false
 scope = ["*.example.com"]
 editor_mode = "default"  # or "vim"
@@ -154,6 +178,11 @@ proto_include = ["./third_party"] # extra import/include paths
 ```
 
 CLI flags override config file values.
+
+Crowbar creates `~/.crowbar` with private directory permissions and stores CA
+key material, sessions, rules, configuration, and logs as private files. Keep
+the generated CA key secret: anyone who obtains it can impersonate certificates
+to systems that trust the Crowbar CA.
 
 ## TUI Tabs
 

@@ -6,19 +6,20 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use http_body::Frame;
 use http_body_util::{BodyExt, Full};
+use hyper::Request;
 use hyper::body::Incoming;
 use hyper::client::conn::http1::Builder as ClientBuilder;
 use hyper::server::conn::http1::Builder as ServerBuilder;
 use hyper::service::service_fn;
-use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error, warn};
 
 use crate::channel::ProxyToUi;
-use crate::http::models::{GrpcDirection, GrpcMessage, HttpVersion, RequestData, RequestId, ResponseData};
+use crate::http::models::{
+    GrpcDirection, GrpcMessage, HttpVersion, RequestData, RequestId, ResponseData,
+};
 use crate::proxy::intercept::InterceptDecision;
 use crate::proxy::{ProxyContext, TimingContext};
 use crate::rules;
@@ -140,21 +141,26 @@ async fn handle_websocket_upgrade(
     };
 
     if in_scope {
-        let _ = ctx.ui_tx.send(ProxyToUi::RequestCaptured(request_data));
+        let _ = ctx.ui_tx.try_send(ProxyToUi::RequestCaptured(request_data));
     }
 
     let client_config = crate::tls::build_tls_client_config();
 
-    let addr = format!("{}:{}", host, port);
-    let tcp = match TcpStream::connect(&addr).await {
+    let tcp = match crate::proxy::connect_tcp(host, port).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("WebSocket: failed to connect to upstream {}: {}", addr, e);
-            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
+            warn!(
+                "WebSocket: failed to connect to upstream {}:{}: {}",
+                host, port, e
+            );
+            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
                 request_id,
                 format!("Connection failed: {}", e),
             ));
-            return Ok(crate::proxy::bad_gateway(&format!("Connection failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!(
+                "Connection failed: {}",
+                e
+            )));
         }
     };
 
@@ -163,12 +169,18 @@ async fn handle_websocket_upgrade(
     let tls_stream = match connector.connect(server_name, tcp).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("WebSocket: TLS handshake failed with {}: {}", addr, e);
-            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
+            warn!(
+                "WebSocket: TLS handshake failed with {}:{}: {}",
+                host, port, e
+            );
+            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
                 request_id,
                 format!("TLS handshake failed: {}", e),
             ));
-            return Ok(crate::proxy::bad_gateway(&format!("TLS handshake failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!(
+                "TLS handshake failed: {}",
+                e
+            )));
         }
     };
 
@@ -182,7 +194,10 @@ async fn handle_websocket_upgrade(
         Ok(pair) => pair,
         Err(e) => {
             warn!("WebSocket: upstream handshake failed: {}", e);
-            return Ok(crate::proxy::bad_gateway(&format!("HTTP handshake failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!(
+                "HTTP handshake failed: {}",
+                e
+            )));
         }
     };
 
@@ -203,8 +218,8 @@ async fn handle_websocket_upgrade(
         .uri(&path_and_query)
         .version(req.version());
 
-    for (key, value) in req.headers() {
-        upstream_req = upstream_req.header(key, value);
+    for (key, value) in crate::proxy::end_to_end_headers(&headers, true) {
+        upstream_req = upstream_req.header(key.as_str(), value.as_str());
     }
 
     let client_req_for_upgrade = req;
@@ -225,7 +240,8 @@ async fn handle_websocket_upgrade(
 
     if resp_status != 101 {
         let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
-        let resp_body = upstream_resp
+        let resp_body = upstream_resp.into_body();
+        let resp_body = http_body_util::Limited::new(resp_body, ctx.limits.max_body_bytes)
             .collect()
             .await
             .map(|b| b.to_bytes())
@@ -251,17 +267,23 @@ async fn handle_websocket_upgrade(
         timing: None,
     };
     if in_scope {
-        let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+        let _ = ctx
+            .ui_tx
+            .try_send(ProxyToUi::ResponseReceived(request_id, response_data));
     }
 
     let ui_tx_clone = ctx.ui_tx.clone();
     let host_owned = host.to_string();
+    let max_ws_frame_bytes = ctx.limits.max_ws_frame_bytes;
 
     tokio::spawn(async move {
         let upstream_upgraded = match hyper::upgrade::on(upstream_resp).await {
             Ok(u) => u,
             Err(e) => {
-                debug!("WebSocket upstream upgrade failed for {}: {}", host_owned, e);
+                debug!(
+                    "WebSocket upstream upgrade failed for {}: {}",
+                    host_owned, e
+                );
                 return;
             }
         };
@@ -282,6 +304,7 @@ async fn handle_websocket_upgrade(
             request_id,
             ui_tx_clone,
             in_scope,
+            max_ws_frame_bytes,
         )
         .await;
     });
@@ -310,11 +333,17 @@ async fn handle_http_request(
     let headers = crate::http::models::extract_headers(req.headers());
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match body.collect().await {
+    let body_bytes = match http_body_util::Limited::new(body, ctx.limits.max_body_bytes)
+        .collect()
+        .await
+    {
         Ok(b) => b.to_bytes(),
         Err(e) => {
             warn!("Failed to read request body: {}", e);
-            return Ok(crate::proxy::bad_gateway(&format!("Failed to read request body: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!(
+                "Failed to read request body: {}",
+                e
+            )));
         }
     };
 
@@ -342,7 +371,9 @@ async fn handle_http_request(
     };
 
     if in_scope {
-        let _ = ctx.ui_tx.send(ProxyToUi::RequestCaptured(request_data.clone()));
+        let _ = ctx
+            .ui_tx
+            .try_send(ProxyToUi::RequestCaptured(request_data.clone()));
 
         if let Some(rx) = ctx.intercept.intercept_request(&request_data, &ctx.ui_tx) {
             match rx.await {
@@ -368,25 +399,41 @@ async fn handle_http_request(
         &mut request_data.body,
     );
 
+    let fallback_authority = request_data
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map_or(request_data.host.as_str(), |(_, value)| value.as_str());
+    let target =
+        match crate::proxy::resolve_upstream_target(&request_data.uri, fallback_authority, port) {
+            Ok(target) => target,
+            Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
+        };
+
     let client_config = crate::tls::build_tls_client_config();
 
-    let addr = format!("{}:{}", host, port);
-    let tcp = match TcpStream::connect(&addr).await {
+    let tcp = match crate::proxy::connect_tcp(&target.host, target.port).await {
         Ok(s) => {
             timing.tcp_connected = Some(Instant::now());
             s
         }
         Err(e) => {
-            warn!("Failed to connect to upstream {}: {}", addr, e);
-            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
+            warn!(
+                "Failed to connect to upstream {}:{}: {}",
+                target.host, target.port, e
+            );
+            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
                 request_id,
                 format!("Connection failed: {}", e),
             ));
-            return Ok(crate::proxy::bad_gateway(&format!("Connection failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!(
+                "Connection failed: {}",
+                e
+            )));
         }
     };
 
-    let server_name = crate::tls::server_name_or_localhost(host);
+    let server_name = crate::tls::server_name_or_localhost(&target.host);
     let connector = TlsConnector::from(client_config);
     let tls_stream = match connector.connect(server_name, tcp).await {
         Ok(s) => {
@@ -394,26 +441,26 @@ async fn handle_http_request(
             s
         }
         Err(e) => {
-            warn!("TLS handshake failed with {}: {}", addr, e);
-            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
+            warn!(
+                "TLS handshake failed with {}:{}: {}",
+                target.host, target.port, e
+            );
+            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
                 request_id,
                 format!("TLS handshake failed: {}", e),
             ));
-            return Ok(crate::proxy::bad_gateway(&format!("TLS handshake failed: {}", e)));
+            return Ok(crate::proxy::bad_gateway(&format!(
+                "TLS handshake failed: {}",
+                e
+            )));
         }
     };
 
     let io = TokioIo::new(tls_stream);
-    let path_and_query = parts
-        .uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
-
     Ok(crate::proxy::forward_h1(
         io,
         parts.version,
-        path_and_query,
+        &target.path_and_query,
         &request_data,
         timing,
         in_scope,
@@ -472,9 +519,10 @@ struct GrpcTeeBody {
     inner: Incoming,
     request_id: RequestId,
     direction: GrpcDirection,
-    ui_tx: mpsc::UnboundedSender<ProxyToUi>,
+    ui_tx: mpsc::Sender<ProxyToUi>,
     buffer: BytesMut,
     in_scope: bool,
+    max_message_bytes: usize,
 }
 
 impl http_body::Body for GrpcTeeBody {
@@ -496,11 +544,14 @@ impl http_body::Body for GrpcTeeBody {
                             this.request_id,
                             this.direction,
                             &this.ui_tx,
+                            this.max_message_bytes,
                         );
                     }
                     if let Some(trailers) = frame.trailers_ref() {
                         let pairs = crate::http::models::extract_trailers(Some(trailers));
-                        let _ = this.ui_tx.send(ProxyToUi::GrpcTrailers(this.request_id, pairs));
+                        let _ = this
+                            .ui_tx
+                            .try_send(ProxyToUi::GrpcTrailers(this.request_id, pairs));
                     }
                 }
                 Poll::Ready(Some(Ok(frame)))
@@ -518,16 +569,24 @@ fn extract_grpc_messages(
     buffer: &mut BytesMut,
     request_id: RequestId,
     direction: GrpcDirection,
-    ui_tx: &mpsc::UnboundedSender<ProxyToUi>,
+    ui_tx: &mpsc::Sender<ProxyToUi>,
+    max_message_bytes: usize,
 ) {
     while buffer.len() >= 5 {
         let compressed = buffer[0] != 0;
-        let len =
-            u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
-        if buffer.len() < 5 + len {
+        let len = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
+        if len > max_message_bytes {
+            buffer.clear();
+            return;
+        }
+        let Some(frame_len) = 5usize.checked_add(len) else {
+            buffer.clear();
+            return;
+        };
+        if buffer.len() < frame_len {
             break;
         }
-        let frame_data = buffer.split_to(5 + len);
+        let frame_data = buffer.split_to(frame_len);
         let payload = Bytes::copy_from_slice(&frame_data[5..]);
 
         let msg = GrpcMessage {
@@ -536,7 +595,7 @@ fn extract_grpc_messages(
             payload,
             timestamp: std::time::SystemTime::now(),
         };
-        let _ = ui_tx.send(ProxyToUi::GrpcFrame(request_id, msg));
+        let _ = ui_tx.try_send(ProxyToUi::GrpcFrame(request_id, msg));
     }
 }
 
@@ -583,7 +642,10 @@ async fn run_h2_tunnel(
     let upstream_sender = match establish_h2_upstream(host, port).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("Failed to establish h2 upstream to {}:{}: {}", host, port, e);
+            warn!(
+                "Failed to establish h2 upstream to {}:{}: {}",
+                host, port, e
+            );
             return Err(e);
         }
     };
@@ -593,9 +655,7 @@ async fn run_h2_tunnel(
         let host = host.clone();
         let ctx = ctx.clone();
         let sender = upstream_sender.clone();
-        async move {
-            handle_h2_request(req, &host, port, &ctx, sender).await
-        }
+        async move { handle_h2_request(req, &host, port, &ctx, sender).await }
     });
 
     hyper::server::conn::http2::Builder::new(TokioExecutor::new())
@@ -611,8 +671,7 @@ async fn establish_h2_upstream(
 ) -> anyhow::Result<hyper::client::conn::http2::SendRequest<Full<Bytes>>> {
     let client_config = crate::tls::build_tls_h2_client_config();
 
-    let addr = format!("{}:{}", host, port);
-    let tcp = TcpStream::connect(&addr).await?;
+    let tcp = crate::proxy::connect_tcp(host, port).await?;
 
     let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
@@ -649,11 +708,17 @@ async fn handle_h2_request(
     let headers = crate::http::models::extract_headers(req.headers());
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match body.collect().await {
+    let body_bytes = match http_body_util::Limited::new(body, ctx.limits.max_body_bytes)
+        .collect()
+        .await
+    {
         Ok(b) => b.to_bytes(),
         Err(e) => {
             warn!("Failed to read h2 request body: {}", e);
-            return Ok(h2_bad_gateway(&format!("Failed to read request body: {}", e)));
+            return Ok(h2_bad_gateway(&format!(
+                "Failed to read request body: {}",
+                e
+            )));
         }
     };
 
@@ -681,30 +746,37 @@ async fn handle_h2_request(
     if in_scope {
         if is_grpc && !body_bytes.is_empty() {
             let mut buf = BytesMut::from(body_bytes.as_ref());
-            extract_grpc_messages(&mut buf, request_id, GrpcDirection::ClientToServer, &ctx.ui_tx);
+            extract_grpc_messages(
+                &mut buf,
+                request_id,
+                GrpcDirection::ClientToServer,
+                &ctx.ui_tx,
+                ctx.limits.max_body_bytes,
+            );
         }
 
-        let _ = ctx.ui_tx.send(ProxyToUi::RequestCaptured(request_data.clone()));
+        let _ = ctx
+            .ui_tx
+            .try_send(ProxyToUi::RequestCaptured(request_data.clone()));
 
-        if !is_grpc
-            && let Some(rx) = ctx.intercept.intercept_request(&request_data, &ctx.ui_tx) {
-                match rx.await {
-                    Ok(InterceptDecision::Drop) => {
-                        return Ok(hyper::Response::builder()
-                            .status(503)
-                            .body(H2RespBody::Buffered(H2Body {
-                                data: Some(Bytes::from("Request dropped by interceptor")),
-                                trailers: None,
-                            }))
-                            .unwrap());
-                    }
-                    Ok(InterceptDecision::ForwardEdited(edited)) => {
-                        request_data = edited;
-                    }
-                    Ok(InterceptDecision::Forward) => {}
-                    Err(_) => {}
+        if !is_grpc && let Some(rx) = ctx.intercept.intercept_request(&request_data, &ctx.ui_tx) {
+            match rx.await {
+                Ok(InterceptDecision::Drop) => {
+                    return Ok(hyper::Response::builder()
+                        .status(503)
+                        .body(H2RespBody::Buffered(H2Body {
+                            data: Some(Bytes::from("Request dropped by interceptor")),
+                            trailers: None,
+                        }))
+                        .unwrap());
                 }
+                Ok(InterceptDecision::ForwardEdited(edited)) => {
+                    request_data = edited;
+                }
+                Ok(InterceptDecision::Forward) => {}
+                Err(_) => {}
             }
+        }
     }
 
     if !is_grpc {
@@ -716,37 +788,39 @@ async fn handle_h2_request(
         );
     }
 
-    let fwd_path = {
-        let uri: http::Uri = request_data.uri.parse().unwrap_or_else(|_| {
-            http::Uri::builder()
-                .path_and_query("/")
-                .build()
-                .unwrap()
-        });
-        uri.path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/")
-            .to_string()
-    };
+    let fallback_authority = request_data
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map_or(host, |(_, value)| value.as_str());
+    let target =
+        match crate::proxy::resolve_upstream_target(&request_data.uri, fallback_authority, port) {
+            Ok(target) => target,
+            Err(error) => return Ok(h2_bad_gateway(&error.to_string())),
+        };
+    if !target.host.eq_ignore_ascii_case(host) || target.port != port {
+        return Ok(h2_bad_gateway(
+            "Changing authority is not supported on an existing HTTP/2 tunnel",
+        ));
+    }
+    let authority = crate::proxy::format_authority(host, port, 443);
+    let upstream_uri = format!("https://{}{}", authority, target.path_and_query);
 
-    let upstream_uri = if port == 443 {
-        format!("https://{}{}", host, fwd_path)
-    } else {
-        format!("https://{}:{}{}", host, port, fwd_path)
-    };
-
-    let upstream_req = crate::proxy::build_forwarding_request(
-        parts.method.as_str(),
+    let upstream_req = match crate::proxy::build_forwarding_request(
+        &request_data.method,
         &upstream_uri,
         &request_data.headers,
         request_data.body.clone(),
-    );
+    ) {
+        Ok(request) => request,
+        Err(error) => return Ok(h2_bad_gateway(&format!("Invalid edited request: {error}"))),
+    };
 
     let upstream_resp = match upstream.send_request(upstream_req).await {
         Ok(resp) => resp,
         Err(e) => {
             warn!("H2 upstream request to {}:{} failed: {}", host, port, e);
-            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
+            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
                 request_id,
                 format!("Request failed: {}", e),
             ));
@@ -759,13 +833,26 @@ async fn handle_h2_request(
 
     if is_grpc {
         return Ok(build_grpc_response(
-            upstream_resp, resp_status, resp_headers, timing, request_id, in_scope, ctx,
+            upstream_resp,
+            resp_status,
+            resp_headers,
+            timing,
+            request_id,
+            in_scope,
+            ctx,
         ));
     }
 
     build_buffered_response(
-        upstream_resp, resp_status, resp_headers, timing, request_id, in_scope, ctx,
-    ).await
+        upstream_resp,
+        resp_status,
+        resp_headers,
+        timing,
+        request_id,
+        in_scope,
+        ctx,
+    )
+    .await
 }
 
 fn build_grpc_response(
@@ -792,7 +879,9 @@ fn build_grpc_response(
             duration,
             timing: Some(timing_data),
         };
-        let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+        let _ = ctx
+            .ui_tx
+            .try_send(ProxyToUi::ResponseReceived(request_id, response_data));
     }
 
     let (_, resp_body_incoming) = upstream_resp.into_parts();
@@ -803,6 +892,7 @@ fn build_grpc_response(
         ui_tx: ctx.ui_tx.clone(),
         buffer: BytesMut::new(),
         in_scope,
+        max_message_bytes: ctx.limits.max_body_bytes,
     };
 
     let mut response = hyper::Response::builder().status(resp_status);
@@ -825,17 +915,21 @@ async fn build_buffered_response(
 
     let (_, resp_body_incoming) = upstream_resp.into_parts();
     let body_start = Instant::now();
-    let collected = match resp_body_incoming.collect().await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to read h2 upstream response body: {}", e);
-            let _ = ctx.ui_tx.send(ProxyToUi::RequestError(
-                request_id,
-                format!("Response body error: {}", e),
-            ));
-            return Ok(h2_bad_gateway(&format!("Response body error: {}", e)));
-        }
-    };
+    let collected =
+        match http_body_util::Limited::new(resp_body_incoming, ctx.limits.max_body_bytes)
+            .collect()
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to read h2 upstream response body: {}", e);
+                let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
+                    request_id,
+                    format!("Response body error: {}", e),
+                ));
+                return Ok(h2_bad_gateway(&format!("Response body error: {}", e)));
+            }
+        };
     let content_transfer = body_start.elapsed();
 
     let resp_trailers = collected.trailers().cloned();
@@ -861,7 +955,9 @@ async fn build_buffered_response(
     };
 
     if in_scope {
-        let _ = ctx.ui_tx.send(ProxyToUi::ResponseReceived(request_id, response_data));
+        let _ = ctx
+            .ui_tx
+            .try_send(ProxyToUi::ResponseReceived(request_id, response_data));
     }
 
     let mut response = hyper::Response::builder().status(resp_status);

@@ -1,17 +1,13 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use crate::app::{App, RuleField};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(3),
-    ])
-    .split(area);
+    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
 
     let rules = app.rules.read();
 
@@ -20,14 +16,15 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
             "No rules configured. Press 'a' to add a rule.",
             Style::default().fg(Color::DarkGray),
         ))
-        .block(Block::default().borders(Borders::ALL).title(" Match & Replace Rules "));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Match & Replace Rules "),
+        );
         frame.render_widget(msg, chunks[0]);
     } else {
-        let detail_split = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(8),
-        ])
-        .split(chunks[0]);
+        let detail_split =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(8)]).split(chunks[0]);
 
         render_table(app, &rules, frame, detail_split[0]);
         render_detail(app, &rules, frame, detail_split[1]);
@@ -37,12 +34,11 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_table(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, area: Rect) {
-    let header = Row::new(["", "Name", "Target", "Scope", "Match", "Replace", "Regex"])
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+    let header = Row::new(["", "Name", "Target", "Scope", "Match", "Replace", "Regex"]).style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = rules
         .iter()
@@ -86,9 +82,11 @@ fn render_table(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, area
         Constraint::Length(5),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Match & Replace Rules "));
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Match & Replace Rules "),
+    );
 
     frame.render_widget(table, area);
 }
@@ -203,11 +201,8 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
         Span::raw(":export"),
     ]);
 
-    let widget = Paragraph::new(line).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Actions "),
-    );
+    let widget =
+        Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(" Actions "));
     frame.render_widget(widget, area);
 }
 
@@ -233,6 +228,10 @@ fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
-    let end = s.char_indices().nth(max - 3).map(|(i, _)| i).unwrap_or(s.len());
+    let end = s
+        .char_indices()
+        .nth(max - 3)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
     format!("{}...", &s[..end])
 }

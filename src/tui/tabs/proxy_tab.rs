@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::App;
 use crate::tui::widgets::{dim_style as dim_key_style, key_style, logo};
@@ -48,7 +48,10 @@ fn render_status_line(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw(" Scope: "),
             Span::styled(&app.scope_buffer, Style::default().fg(Color::White)),
             Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
-            Span::styled("  (comma-separated, e.g. *.example.com, api.test.com)", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  (comma-separated, e.g. *.example.com, api.test.com)",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
         let widget = Paragraph::new(line).block(
             Block::default()
@@ -71,15 +74,17 @@ fn render_status_line(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         Span::styled(
             " INTERCEPT OFF ",
-            Style::default()
-                .bg(Color::DarkGray)
-                .fg(Color::White),
+            Style::default().bg(Color::DarkGray).fg(Color::White),
         )
     };
 
     let queue_count = app.intercept_ui.queue.len();
     let queue_text = if queue_count > 0 {
-        format!("  {} request{} queued", queue_count, if queue_count == 1 { "" } else { "s" })
+        format!(
+            "  {} request{} queued",
+            queue_count,
+            if queue_count == 1 { "" } else { "s" }
+        )
     } else {
         String::new()
     };
@@ -90,11 +95,8 @@ fn render_status_line(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled(queue_text, Style::default().fg(Color::Yellow)),
     ]);
 
-    let widget = Paragraph::new(line).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Proxy "),
-    );
+    let widget =
+        Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(" Proxy "));
     frame.render_widget(widget, area);
 }
 
@@ -107,7 +109,10 @@ fn render_current_request(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw(" "),
             Span::raw(&req.uri),
             Span::raw(" "),
-            Span::styled(req.version.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                req.version.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
         lines.push(Line::raw(""));
 
@@ -226,10 +231,7 @@ fn render_actions(app: &App, frame: &mut Frame, area: Rect) {
         ])
     };
 
-    let widget = Paragraph::new(actions).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Actions "),
-    );
+    let widget =
+        Paragraph::new(actions).block(Block::default().borders(Borders::ALL).title(" Actions "));
     frame.render_widget(widget, area);
 }
