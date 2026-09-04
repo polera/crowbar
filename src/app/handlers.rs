@@ -403,13 +403,19 @@ impl App {
             }
             (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                 let output = self.tools_output();
-                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(output)) {
-                    Ok(()) => {
-                        self.set_status("Copied to clipboard");
+                if self.clipboard.is_none() {
+                    match arboard::Clipboard::new() {
+                        Ok(clipboard) => self.clipboard = Some(clipboard),
+                        Err(e) => {
+                            self.set_status(format!("Clipboard error: {}", e));
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        self.set_status(format!("Clipboard error: {}", e));
-                    }
+                }
+
+                match self.clipboard.as_mut().unwrap().set_text(output) {
+                    Ok(()) => self.set_status("Copied to clipboard"),
+                    Err(e) => self.set_status(format!("Clipboard error: {}", e)),
                 }
             }
             _ => {}

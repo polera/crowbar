@@ -89,6 +89,8 @@ pub struct App {
 
     pub show_help: bool,
     pub status_message: Option<(String, std::time::Instant)>,
+    // X11 requires the selection owner to stay alive to serve clipboard data.
+    clipboard: Option<arboard::Clipboard>,
     pub rules: SharedRules,
     pub editor_mode: EditorMode,
     pub proxy_running: bool,
@@ -226,6 +228,7 @@ impl App {
             },
             show_help: false,
             status_message: None,
+            clipboard: None,
             rules,
             rules_ui: RulesUiState {
                 selected: 0,
