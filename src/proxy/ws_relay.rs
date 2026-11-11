@@ -53,7 +53,7 @@ pub async fn relay<C, S>(
                                 };
                                 let _ = ui_tx.try_send(ProxyToUi::WebSocketFrame(request_id, msg));
                             }
-                            if server.write_all(&raw).await.is_err() {
+                            if crate::proxy::io_timeout(server.write_all(&raw)).await.is_err() {
                                 return;
                             }
                         }
@@ -81,7 +81,7 @@ pub async fn relay<C, S>(
                                 };
                                 let _ = ui_tx.try_send(ProxyToUi::WebSocketFrame(request_id, msg));
                             }
-                            if client.write_all(&raw).await.is_err() {
+                            if crate::proxy::io_timeout(client.write_all(&raw)).await.is_err() {
                                 return;
                             }
                         }

@@ -74,9 +74,9 @@ pub struct Rule {
     pub enabled: bool,
     pub target: RuleTarget,
     pub scope: RuleScope,
-    pub match_pattern: String,
+    match_pattern: String,
     pub replacement: String,
-    pub is_regex: bool,
+    is_regex: bool,
     #[serde(skip)]
     compiled_regex: OnceLock<Option<Regex>>,
 }
@@ -95,8 +95,40 @@ impl Rule {
         }
     }
 
-    pub fn invalidate_regex(&mut self) {
+    fn invalidate_regex(&mut self) {
         self.compiled_regex = OnceLock::new();
+    }
+
+    pub fn pattern(&self) -> &str {
+        &self.match_pattern
+    }
+    pub fn is_regex(&self) -> bool {
+        self.is_regex
+    }
+
+    pub fn validate(&self) -> Result<(), regex::Error> {
+        if self.is_regex && !self.match_pattern.is_empty() {
+            Regex::new(&self.match_pattern)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_pattern(&mut self, pattern: String) -> Result<(), regex::Error> {
+        if self.is_regex && !pattern.is_empty() {
+            Regex::new(&pattern)?;
+        }
+        self.match_pattern = pattern;
+        self.invalidate_regex();
+        Ok(())
+    }
+
+    pub fn set_regex(&mut self, enabled: bool) -> Result<(), regex::Error> {
+        if enabled && !self.match_pattern.is_empty() {
+            Regex::new(&self.match_pattern)?;
+        }
+        self.is_regex = enabled;
+        self.invalidate_regex();
+        Ok(())
     }
 
     fn get_compiled_regex(&self) -> Option<&Regex> {

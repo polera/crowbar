@@ -52,7 +52,7 @@ impl CertificateAuthority {
         params
     }
 
-    fn generate() -> anyhow::Result<Self> {
+    pub(crate) fn generate() -> anyhow::Result<Self> {
         let ca_key = KeyPair::generate()?;
         let ca_cert = Self::ca_params().self_signed(&ca_key)?;
         let ca_cert_pem = ca_cert.pem();

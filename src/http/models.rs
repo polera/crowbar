@@ -48,21 +48,45 @@ impl From<hyper::Version> for HttpVersion {
     }
 }
 
+impl From<HttpVersion> for hyper::Version {
+    fn from(version: HttpVersion) -> Self {
+        match version {
+            HttpVersion::Http10 => Self::HTTP_10,
+            HttpVersion::Http11 => Self::HTTP_11,
+            HttpVersion::Http2 => Self::HTTP_2,
+        }
+    }
+}
+
 pub fn extract_headers(headers: &hyper::HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                v.as_bytes().iter().map(|&byte| char::from(byte)).collect(),
+            )
+        })
         .collect()
 }
 
 pub fn extract_trailers(trailers: Option<&hyper::HeaderMap>) -> Vec<(String, String)> {
-    trailers
-        .map(|t| {
-            t.iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+    trailers.map(extract_headers).unwrap_or_default()
+}
+
+/// Persist HTTP field values as Latin-1 strings, retaining every obs-text octet.
+/// Unicode entered by a user outside Latin-1 is encoded as UTF-8.
+pub fn header_value(value: &str) -> Result<http::HeaderValue, http::header::InvalidHeaderValue> {
+    let mut bytes = Vec::with_capacity(value.len());
+    for character in value.chars() {
+        if let Ok(byte) = u8::try_from(character as u32) {
+            bytes.push(byte);
+        } else {
+            let mut encoded = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+        }
+    }
+    http::HeaderValue::from_bytes(&bytes)
 }
 
 pub fn status_reason(code: u16) -> &'static str {
@@ -225,6 +249,8 @@ pub struct HistoryEntry {
     pub grpc_messages: Vec<GrpcMessage>,
     #[serde(default)]
     pub findings: Vec<crate::scanning::Finding>,
+    #[serde(default)]
+    pub request_body_truncated: bool,
 }
 
 impl HistoryEntry {
@@ -485,6 +511,7 @@ mod tests {
             ws_messages: vec![],
             grpc_messages: vec![],
             findings: vec![],
+            request_body_truncated: false,
         }
     }
 

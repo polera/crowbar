@@ -262,6 +262,7 @@ fn render_detail_filtered(
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
 
     // Request pane
+    // Captures larger than the configured limit are inspection-only, never replayed.
     let mut req_lines: Vec<Line> = Vec::new();
     let req = &entry.request;
 
@@ -276,6 +277,13 @@ fn render_detail_filtered(
         ),
     ]));
     req_lines.push(Line::raw(""));
+
+    if entry.request_body_truncated {
+        req_lines.push(Line::styled(
+            "Request capture truncated — replay disabled",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
 
     req_lines.extend(crate::tui::widgets::header_lines(&req.headers));
 

@@ -2,15 +2,15 @@ use crate::http::models::{GrpcMessage, RequestData, RequestId, ResponseData, WsM
 
 #[derive(Debug)]
 pub enum ProxyToUi {
+    SessionSaved(Result<std::path::PathBuf, String>, bool),
     RequestCaptured(RequestData),
     ResponseReceived(RequestId, ResponseData),
     InterceptedRequest(RequestData),
     RequestError(RequestId, String),
-    RepeaterResponse(ResponseData),
-    RepeaterError(String),
+    RepeaterFinished(RequestId, Result<ResponseData, String>),
     WebSocketFrame(RequestId, WsMessage),
     GrpcFrame(RequestId, GrpcMessage),
     GrpcTrailers(RequestId, Vec<(String, String)>),
-    MacroResponse(usize, ResponseData),
-    MacroError(usize, String),
+    RequestCaptureTruncated(RequestId),
+    MacroFinished(RequestId, usize, Result<ResponseData, String>),
 }

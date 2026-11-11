@@ -1,4 +1,6 @@
 pub mod handler;
+#[cfg(test)]
+mod integration_tests;
 pub mod intercept;
 pub mod repeater;
 pub mod scope;
@@ -14,12 +16,27 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response};
 use tokio::sync::mpsc;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use hyper::client::conn::http1::Builder as ClientBuilder;
 use hyper_util::rt::TokioIo;
 use tracing::debug;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) async fn io_timeout<T, E>(
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> anyhow::Result<T>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    use anyhow::Context;
+    tokio::time::timeout(IO_TIMEOUT, future)
+        .await
+        .context("network operation timed out")?
+        .map_err(|error| anyhow::Error::from_boxed(error.into()))
+}
 
 use crate::channel::ProxyToUi;
 use crate::http::models::{RequestId, ResponseData, TimingData};
@@ -48,6 +65,15 @@ pub(crate) struct UpstreamTarget {
     pub host: String,
     pub port: u16,
     pub path_and_query: String,
+    pub scheme: Option<http::uri::Scheme>,
+}
+
+impl UpstreamTarget {
+    pub(crate) fn uses_tls(&self, fallback: bool) -> bool {
+        self.scheme.as_ref().map_or(fallback, |scheme| {
+            matches!(scheme.as_str(), "https" | "wss")
+        })
+    }
 }
 
 pub(crate) fn resolve_upstream_target(
@@ -58,20 +84,34 @@ pub(crate) fn resolve_upstream_target(
     let parsed: http::Uri = uri
         .parse()
         .map_err(|error| anyhow::anyhow!("invalid request URI {uri:?}: {error}"))?;
-    let fallback: http::uri::Authority = fallback_authority
-        .parse()
-        .map_err(|error| anyhow::anyhow!("invalid authority {fallback_authority:?}: {error}"))?;
-    let authority = parsed.authority().unwrap_or(&fallback);
+    let fallback;
+    let authority = if let Some(authority) = parsed.authority() {
+        authority
+    } else {
+        fallback = fallback_authority
+            .parse::<http::uri::Authority>()
+            .map_err(|error| {
+                anyhow::anyhow!("invalid authority {fallback_authority:?}: {error}")
+            })?;
+        &fallback
+    };
+    let port = match parsed.scheme_str() {
+        Some("http" | "ws") => 80,
+        Some("https" | "wss") => 443,
+        None => default_port,
+        Some(scheme) => anyhow::bail!("Unsupported upstream scheme {scheme:?}"),
+    };
     Ok(UpstreamTarget {
         host: authority
             .host()
             .trim_start_matches('[')
             .trim_end_matches(']')
             .to_string(),
-        port: authority.port_u16().unwrap_or(default_port),
+        port: authority.port_u16().unwrap_or(port),
         path_and_query: parsed
             .path_and_query()
             .map_or_else(|| "/".to_string(), ToString::to_string),
+        scheme: parsed.scheme().cloned(),
     })
 }
 
@@ -153,6 +193,56 @@ pub struct ProxyContext {
     pub scope: Arc<Scope>,
     pub rules: SharedRules,
     pub limits: ProxyLimits,
+    pub(crate) tls_client_config: Arc<rustls::ClientConfig>,
+    pub(crate) tls_h2_client_config: Arc<rustls::ClientConfig>,
+    pub(crate) tasks: TaskTracker,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) connection_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+impl ProxyContext {
+    pub(crate) async fn report_error(&self, id: RequestId, message: impl Into<String>) {
+        let _ = self
+            .ui_tx
+            .send(ProxyToUi::RequestError(id, message.into()))
+            .await;
+    }
+    pub fn new(
+        ui_tx: mpsc::Sender<ProxyToUi>,
+        cert_cache: Arc<CertCache>,
+        intercept: Arc<InterceptState>,
+        scope: Arc<Scope>,
+        rules: SharedRules,
+        limits: ProxyLimits,
+    ) -> Self {
+        Self {
+            ui_tx,
+            cert_cache,
+            intercept,
+            scope,
+            rules,
+            limits,
+            tls_client_config: crate::tls::build_tls_client_config(),
+            tls_h2_client_config: crate::tls::build_tls_h2_client_config(),
+            tasks: TaskTracker::new(),
+            cancel: CancellationToken::new(),
+            connection_permit: None,
+        }
+    }
+
+    /// Upgrades and upstream drivers remain owned by the server, not detached.
+    pub(crate) fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
+        let cancel = self.cancel.clone();
+        let permit = self.connection_permit.clone();
+        self.tasks.spawn(async move {
+            let _permit = permit;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {},
+                _ = future => {},
+            }
+        });
+    }
 }
 
 pub(crate) fn build_forwarding_request(
@@ -161,9 +251,14 @@ pub(crate) fn build_forwarding_request(
     headers: &[(String, String)],
     body: Bytes,
 ) -> Result<Request<Full<Bytes>>, http::Error> {
+    let method: http::Method = method.parse()?;
+    let uri: http::Uri = uri.parse()?;
     let mut builder = Request::builder().method(method).uri(uri);
     for (key, value) in end_to_end_headers(headers, false) {
-        builder = builder.header(key.as_str(), value.as_str());
+        if key.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        builder = builder.header(key.as_str(), crate::http::models::header_value(value)?);
     }
     builder.body(Full::new(body))
 }
@@ -197,28 +292,40 @@ pub(crate) fn end_to_end_headers(
     })
 }
 
-pub(crate) fn build_client_response(
+pub(crate) fn build_response<B>(
     status: u16,
     headers: &[(String, String)],
-    body: Bytes,
-) -> Response<Full<Bytes>> {
+    body: B,
+    preserve_upgrade: bool,
+) -> Result<Response<B>, http::Error> {
     let mut builder = Response::builder().status(status);
-    for (key, value) in end_to_end_headers(headers, false) {
-        builder = builder.header(key.as_str(), value.as_str());
+    for (key, value) in end_to_end_headers(headers, preserve_upgrade) {
+        let value = crate::http::models::header_value(value)?;
+        builder = builder.header(key.as_str(), value);
     }
-    builder.body(Full::new(body)).unwrap_or_else(|error| {
-        Response::builder()
-            .status(http::StatusCode::BAD_GATEWAY)
-            .body(Full::new(Bytes::from(format!(
-                "Invalid rewritten response: {error}"
-            ))))
-            .expect("static 502 response is valid")
-    })
+    builder.body(body)
+}
+
+pub(crate) fn normalize_response_headers(
+    headers: &mut Vec<(String, String)>,
+    body_len: usize,
+    method: &str,
+    status: u16,
+) {
+    // HEAD and 304 may advertise the representation's length without a body.
+    if method.eq_ignore_ascii_case("HEAD") || status == 304 {
+        return;
+    }
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-length"));
+    if status >= 200 && status != 204 {
+        headers.push(("content-length".into(), body_len.to_string()));
+    }
 }
 
 pub(crate) async fn process_h1_response(
     upstream_resp: Response<hyper::body::Incoming>,
     request_id: RequestId,
+    request_method: &str,
     timing: TimingContext,
     in_scope: bool,
     ctx: &ProxyContext,
@@ -228,24 +335,50 @@ pub(crate) async fn process_h1_response(
     let mut resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
 
     let body_start = Instant::now();
-    let mut resp_body =
-        match http_body_util::Limited::new(upstream_resp.into_body(), ctx.limits.max_body_bytes)
-            .collect()
-            .await
-        {
-            Ok(body) => body.to_bytes(),
-            Err(error) => {
-                let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                    request_id,
-                    format!("Response body rejected: {error}"),
-                ));
-                return bad_gateway(&format!("Response body rejected: {error}"));
-            }
-        };
+    let mut resp_body = match io_timeout(
+        http_body_util::Limited::new(upstream_resp.into_body(), ctx.limits.max_body_bytes)
+            .collect(),
+    )
+    .await
+    {
+        Ok(body) => body.to_bytes(),
+        Err(error) => {
+            ctx.report_error(request_id, format!("Response body rejected: {error}"))
+                .await;
+            return bad_gateway(&format!("Response body rejected: {error}"));
+        }
+    };
     let content_transfer = body_start.elapsed();
     let duration = timing.start.elapsed();
 
     rules::apply_response_rules(&ctx.rules, &mut resp_headers, &mut resp_body);
+    if resp_body.len() > ctx.limits.max_body_bytes {
+        return bad_gateway("Rewritten response body exceeds configured limit");
+    }
+    normalize_response_headers(
+        &mut resp_headers,
+        resp_body.len(),
+        request_method,
+        resp_status,
+    );
+    let response = match build_response(
+        resp_status,
+        &resp_headers,
+        Full::new(resp_body.clone()),
+        false,
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = ctx
+                .ui_tx
+                .send(ProxyToUi::RequestError(
+                    request_id,
+                    format!("Invalid rewritten response: {error}"),
+                ))
+                .await;
+            return bad_gateway(&format!("Invalid rewritten response: {error}"));
+        }
+    };
 
     let timing_data = timing.finish(Some(content_transfer));
 
@@ -263,10 +396,11 @@ pub(crate) async fn process_h1_response(
     if in_scope {
         let _ = ctx
             .ui_tx
-            .try_send(ProxyToUi::ResponseReceived(request_id, response_data));
+            .send(ProxyToUi::ResponseReceived(request_id, response_data))
+            .await;
     }
 
-    build_client_response(resp_status, &resp_headers, resp_body)
+    response
 }
 
 pub(crate) fn bad_gateway(msg: &str) -> Response<Full<Bytes>> {
@@ -285,6 +419,13 @@ pub(crate) fn payload_too_large() -> Response<Full<Bytes>> {
         .expect("static 413 response is valid")
 }
 
+pub(crate) fn service_unavailable(message: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(503)
+        .body(Full::new(Bytes::copy_from_slice(message.as_bytes())))
+        .expect("static status is valid")
+}
+
 pub(crate) async fn forward_h1<IO>(
     io: TokioIo<IO>,
     version: hyper::Version,
@@ -298,6 +439,9 @@ where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let request_id = request_data.id;
+    if request_data.body.len() > ctx.limits.max_body_bytes {
+        return payload_too_large();
+    }
 
     let (mut sender, conn) = match ClientBuilder::new()
         .preserve_header_case(true)
@@ -307,17 +451,15 @@ where
     {
         Ok(pair) => pair,
         Err(e) => {
-            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                request_id,
-                format!("HTTP handshake failed: {}", e),
-            ));
+            ctx.report_error(request_id, format!("HTTP handshake failed: {e}"))
+                .await;
             return bad_gateway(&format!("HTTP handshake failed: {}", e));
         }
     };
 
     timing.http_handshake_done = Some(Instant::now());
 
-    tokio::spawn(async move {
+    ctx.spawn(async move {
         if let Err(e) = conn.await {
             debug!("Upstream connection ended: {}", e);
         }
@@ -331,34 +473,94 @@ where
     ) {
         Ok(request) => request,
         Err(error) => {
-            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                request_id,
-                format!("Invalid edited request: {error}"),
-            ));
+            ctx.report_error(request_id, format!("Invalid edited request: {error}"))
+                .await;
             return bad_gateway(&format!("Invalid edited request: {error}"));
         }
     };
     *upstream_req.version_mut() = version;
 
-    let upstream_resp = match sender.send_request(upstream_req).await {
+    let upstream_resp = match io_timeout(sender.send_request(upstream_req)).await {
         Ok(resp) => resp,
         Err(e) => {
-            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                request_id,
-                format!("Request failed: {}", e),
-            ));
+            ctx.report_error(request_id, format!("Request failed: {e}"))
+                .await;
             return bad_gateway(&format!("Upstream request failed: {}", e));
         }
     };
 
     timing.first_byte = Some(Instant::now());
 
-    process_h1_response(upstream_resp, request_id, timing, in_scope, ctx).await
+    process_h1_response(
+        upstream_resp,
+        request_id,
+        &request_data.method,
+        timing,
+        in_scope,
+        ctx,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn network_operations_have_a_deadline() {
+        let operation = std::future::pending::<Result<(), std::io::Error>>();
+        let start = tokio::time::Instant::now();
+        assert!(io_timeout(operation).await.is_err());
+        assert_eq!(start.elapsed(), IO_TIMEOUT);
+    }
+
+    #[test]
+    fn non_ascii_header_octets_round_trip_without_placeholder_replacement() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-binary",
+            http::HeaderValue::from_bytes(b"\xff\x80").unwrap(),
+        );
+        let stored = crate::http::models::extract_headers(&headers);
+        let request = build_forwarding_request("GET", "/", &stored, Bytes::new()).unwrap();
+        assert_eq!(request.headers()["x-binary"].as_bytes(), b"\xff\x80");
+        assert!(
+            build_response(200, &[("x-test".into(), "bad\r\nheader".into())], (), false).is_err()
+        );
+    }
+
+    #[test]
+    fn framing_is_recomputed_except_for_representation_metadata() {
+        let headers = vec![("content-length".into(), "3".into())];
+        let request =
+            build_forwarding_request("POST", "/", &headers, Bytes::from_static(b"longer")).unwrap();
+        assert!(!request.headers().contains_key("content-length"));
+        for (method, status, expected) in [
+            ("GET", 200, Some("6")),
+            ("HEAD", 200, Some("3")),
+            ("GET", 304, Some("3")),
+            ("GET", 204, None),
+        ] {
+            let mut headers = headers.clone();
+            normalize_response_headers(&mut headers, 6, method, status);
+            assert_eq!(
+                headers
+                    .iter()
+                    .find(|(name, _)| name == "content-length")
+                    .map(|(_, value)| value.as_str()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn authority_resolution_uses_scheme_defaults_and_validates_only_needed_fallback() {
+        let target = resolve_upstream_target("https://example.com/path", "", 80).unwrap();
+        assert_eq!(target.port, 443);
+        assert!(target.uses_tls(false));
+        assert_eq!(format_authority("::1", 8443, 443), "[::1]:8443");
+        assert!(resolve_upstream_target("ftp://example.com/", "", 80).is_err());
+    }
 
     #[test]
     fn timing_context_finish_all_phases() {
@@ -452,11 +654,13 @@ mod tests {
 
     #[test]
     fn build_client_response_basic() {
-        let resp = build_client_response(
+        let resp = build_response(
             404,
             &[("x-error".into(), "not found".into())],
-            Bytes::from("Not Found"),
-        );
+            Full::new(Bytes::from("Not Found")),
+            false,
+        )
+        .unwrap();
         assert_eq!(resp.status(), 404);
         assert_eq!(resp.headers().get("x-error").unwrap(), "not found");
     }
@@ -495,6 +699,7 @@ mod tests {
                 host: "example.com".into(),
                 port: 8080,
                 path_and_query: "/a?q=1".into(),
+                scheme: Some(http::uri::Scheme::HTTP),
             }
         );
         assert_eq!(
@@ -503,6 +708,7 @@ mod tests {
                 host: "[::1]".trim_matches(['[', ']']).to_string(),
                 port: 9090,
                 path_and_query: "/v1".into(),
+                scheme: None,
             }
         );
     }

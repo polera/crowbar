@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use serde::Deserialize;
@@ -28,19 +28,21 @@ pub fn load_file(path: &Path) -> anyhow::Result<super::session::Session> {
 }
 
 fn load_har(path: &Path) -> anyhow::Result<Vec<HistoryEntry>> {
-    let content = std::fs::read_to_string(path)?;
-    let har: HarFile = serde_json::from_str(&content)?;
+    let content = super::session::read_input(path)?;
+    let har: HarFile = serde_json::from_slice(&content)?;
 
-    let entries = har.log.entries.into_iter().map(convert_har_entry).collect();
-
-    Ok(entries)
+    har.log.entries.into_iter().map(convert_har_entry).collect()
 }
 
-fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
+fn convert_har_entry(entry: HarEntry) -> anyhow::Result<HistoryEntry> {
     let req = &entry.request;
 
     let host = extract_host(&req.url);
-    let is_tls = req.url.starts_with("https");
+    let is_tls = req
+        .url
+        .parse::<http::Uri>()
+        .ok()
+        .is_some_and(|uri| uri.scheme_str() == Some("https"));
 
     let version = parse_http_version(&req.http_version);
 
@@ -56,7 +58,8 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         .map(|pd| Bytes::from(pd.text.clone().unwrap_or_default()))
         .unwrap_or_default();
 
-    let timestamp = parse_iso_timestamp(&entry.started_date_time).unwrap_or(SystemTime::now());
+    let timestamp = parse_iso_timestamp(&entry.started_date_time)
+        .ok_or_else(|| anyhow::anyhow!("Invalid HAR timestamp {:?}", entry.started_date_time))?;
 
     let request_data = RequestData {
         id: RequestId::next(),
@@ -83,7 +86,18 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         .content
         .text
         .as_ref()
-        .map(|t| Bytes::from(t.clone()))
+        .map(|t| {
+            if resp.content.encoding.as_deref() == Some("base64") {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(t)
+                    .map(Bytes::from)
+                    .map_err(anyhow::Error::from)
+            } else {
+                Ok(Bytes::from(t.clone()))
+            }
+        })
+        .transpose()?
         .unwrap_or_default();
 
     let duration = Duration::from_millis(entry.time.max(0.0) as u64);
@@ -99,7 +113,7 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         timing: None,
     };
 
-    HistoryEntry {
+    Ok(HistoryEntry {
         request: request_data,
         response: Some(response_data),
         state: EntryState::Complete,
@@ -107,18 +121,24 @@ fn convert_har_entry(entry: HarEntry) -> HistoryEntry {
         ws_messages: Vec::new(),
         grpc_messages: Vec::new(),
         findings: Vec::new(),
-    }
+        request_body_truncated: false,
+    })
 }
 
 fn extract_host(url: &str) -> String {
-    if let Some(pos) = url.find("://") {
-        let after_scheme = &url[pos + 3..];
-        let end = after_scheme.find('/').unwrap_or(after_scheme.len());
-        let host_port = &after_scheme[..end];
-        host_port.split(':').next().unwrap_or(host_port).to_string()
+    let absolute = if url.contains("://") {
+        url.to_string()
     } else {
-        url.split('/').next().unwrap_or("unknown").to_string()
-    }
+        format!("http://{url}")
+    };
+    absolute
+        .parse::<http::Uri>()
+        .ok()
+        .and_then(|uri| {
+            uri.host()
+                .map(|host| host.trim_matches(['[', ']']).to_string())
+        })
+        .unwrap_or_default()
 }
 
 fn parse_http_version(v: &str) -> HttpVersion {
@@ -130,23 +150,10 @@ fn parse_http_version(v: &str) -> HttpVersion {
 }
 
 fn parse_iso_timestamp(s: &str) -> Option<SystemTime> {
-    let s = s.trim();
-    let date_part = s.get(..10)?;
-    let time_part = s.get(11..19)?;
-
-    let mut date_iter = date_part.split('-');
-    let year: u64 = date_iter.next()?.parse().ok()?;
-    let month: u64 = date_iter.next()?.parse().ok()?;
-    let day: u64 = date_iter.next()?.parse().ok()?;
-
-    let mut time_iter = time_part.split(':');
-    let hour: u64 = time_iter.next()?.parse().ok()?;
-    let min: u64 = time_iter.next()?.parse().ok()?;
-    let sec: u64 = time_iter.next()?.parse().ok()?;
-
-    let days = super::date_to_days(year, month, day);
-    let total_secs = days * 86400 + hour * 3600 + min * 60 + sec;
-    Some(UNIX_EPOCH + Duration::from_secs(total_secs))
+    let timestamp =
+        time::OffsetDateTime::parse(s.trim(), &time::format_description::well_known::Rfc3339)
+            .ok()?;
+    Some(timestamp.into())
 }
 
 #[derive(Deserialize)]
@@ -202,11 +209,26 @@ struct HarHeader {
 #[derive(Deserialize)]
 struct HarContent {
     text: Option<String>,
+    encoding: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn timestamps_honor_offsets_fractional_seconds_and_invalid_dates() {
+        let utc = parse_iso_timestamp("2024-01-01T00:00:00.125Z").unwrap();
+        assert_eq!(
+            parse_iso_timestamp("2024-01-01T01:00:00.125+01:00"),
+            Some(utc)
+        );
+        assert_eq!(utc.duration_since(UNIX_EPOCH).unwrap().subsec_millis(), 125);
+        assert!(parse_iso_timestamp("2024-02-31T00:00:00Z").is_none());
+        assert!(parse_iso_timestamp("99999999999999999999-01-01T00:00:00Z").is_none());
+        assert_eq!(extract_host("https://[::1]:8443/path?q=1"), "::1");
+    }
 
     #[test]
     fn parse_http_version_http10() {
@@ -263,7 +285,7 @@ mod tests {
     fn parse_iso_timestamp_with_time() {
         let ts = parse_iso_timestamp("2024-06-15T14:30:00.000Z").unwrap();
         let secs = ts.duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let expected = super::super::date_to_days(2024, 6, 15) * 86400 + 14 * 3600 + 30 * 60;
+        let expected = 1_718_461_800; // 2024-06-15T14:30:00Z
         assert_eq!(secs, expected);
     }
 
@@ -301,11 +323,12 @@ mod tests {
                 headers: vec![],
                 content: HarContent {
                     text: Some("{\"id\":1}".into()),
+                    encoding: None,
                 },
             },
         };
 
-        let result = convert_har_entry(entry);
+        let result = convert_har_entry(entry).unwrap();
         assert_eq!(result.request.method, "POST");
         assert_eq!(result.request.host, "api.example.com");
         assert!(result.request.is_tls);
@@ -337,11 +360,14 @@ mod tests {
                 status_text: "OK".into(),
                 http_version: "HTTP/1.1".into(),
                 headers: vec![],
-                content: HarContent { text: None },
+                content: HarContent {
+                    text: None,
+                    encoding: None,
+                },
             },
         };
 
-        let result = convert_har_entry(entry);
+        let result = convert_har_entry(entry).unwrap();
         assert!(!result.request.is_tls);
         assert!(result.request.body.is_empty());
         assert!(result.response.unwrap().body.is_empty());
@@ -364,11 +390,14 @@ mod tests {
                 status_text: "OK".into(),
                 http_version: "HTTP/1.1".into(),
                 headers: vec![],
-                content: HarContent { text: None },
+                content: HarContent {
+                    text: None,
+                    encoding: None,
+                },
             },
         };
 
-        let result = convert_har_entry(entry);
+        let result = convert_har_entry(entry).unwrap();
         assert_eq!(result.response.unwrap().duration, Duration::from_millis(0));
     }
 }

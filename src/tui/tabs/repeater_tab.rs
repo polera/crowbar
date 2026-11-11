@@ -157,7 +157,7 @@ fn render_diff(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_response(app: &App, frame: &mut Frame, area: Rect) {
-    if app.repeater.pending {
+    if app.repeater.operation.is_pending() {
         let msg = Paragraph::new("Sending request...")
             .block(Block::default().borders(Borders::ALL).title(" Response "))
             .style(Style::default().fg(Color::Yellow));
@@ -165,7 +165,7 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    if let Some(ref error) = app.repeater.error {
+    if let Some(error) = app.repeater.operation.error() {
         let msg = Paragraph::new(format!("Error: {}", error))
             .block(Block::default().borders(Borders::ALL).title(" Response "))
             .style(Style::default().fg(Color::Red))
@@ -174,7 +174,7 @@ fn render_response(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let content = if let Some(ref resp) = app.repeater.response {
+    let content = if let Some(resp) = app.repeater.operation.response() {
         let mut lines: Vec<Line> = Vec::new();
 
         let status_style = match resp.status {

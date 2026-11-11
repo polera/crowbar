@@ -87,7 +87,7 @@ fn decode_raw_inner(data: &[u8], depth: usize) -> Option<Vec<ProtoField>> {
         pos += bytes_read;
 
         let wire_type = (tag & 0x07) as u8;
-        let field_number = (tag >> 3) as u32;
+        let field_number = u32::try_from(tag >> 3).ok()?;
 
         if field_number == 0 || field_number > 536_870_911 {
             return None;
@@ -116,12 +116,10 @@ fn decode_raw_inner(data: &[u8], depth: usize) -> Option<Vec<ProtoField>> {
             2 => {
                 let (len, bytes_read) = read_varint(&data[pos..])?;
                 pos += bytes_read;
-                let len = len as usize;
-                if pos + len > data.len() {
-                    return None;
-                }
-                let payload = &data[pos..pos + len];
-                pos += len;
+                let len = usize::try_from(len).ok()?;
+                let end = pos.checked_add(len)?;
+                let payload = data.get(pos..end)?;
+                pos = end;
                 fields.push(ProtoField {
                     number: field_number,
                     value: interpret_length_delimited(payload, depth),
@@ -154,7 +152,7 @@ fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
     let mut shift = 0;
 
     for (i, &byte) in data.iter().enumerate() {
-        if shift >= 64 {
+        if shift >= 64 || (i == 9 && byte > 1) {
             return None;
         }
         result |= ((byte & 0x7F) as u64) << shift;
@@ -166,6 +164,23 @@ fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod malformed_tests {
+    use super::*;
+
+    #[test]
+    fn overflowing_lengths_and_varints_are_rejected() {
+        let mut payload = vec![0x0a];
+        payload.extend_from_slice(&[0xff; 9]);
+        payload.push(1);
+        assert!(decode_raw(&payload).is_none());
+        assert!(read_varint(&[0xff; 10]).is_none());
+        let mut overflow = vec![0xff; 9];
+        overflow.push(2);
+        assert!(read_varint(&overflow).is_none());
+    }
 }
 
 fn interpret_length_delimited(data: &[u8], depth: usize) -> ProtoValue {
@@ -264,6 +279,9 @@ pub fn parse_proto_text(lines: &[&str]) -> Option<Vec<ProtoField>> {
 }
 
 fn parse_proto_at_depth(lines: &[&str], pos: &mut usize, depth: usize) -> Option<Vec<ProtoField>> {
+    if depth > MAX_DECODE_DEPTH {
+        return None;
+    }
     let mut fields = Vec::new();
 
     while *pos < lines.len() {
@@ -301,14 +319,7 @@ fn parse_proto_at_depth(lines: &[&str], pos: &mut usize, depth: usize) -> Option
                     "int" => ProtoValue::Varint(value_str.parse().ok()?),
                     "str" => ProtoValue::String(value_str.to_string()),
                     "hex" => {
-                        if !value_str.len().is_multiple_of(2) {
-                            return None;
-                        }
-                        let bytes: Vec<u8> = (0..value_str.len())
-                            .step_by(2)
-                            .map(|j| u8::from_str_radix(&value_str[j..j + 2], 16))
-                            .collect::<Result<_, _>>()
-                            .ok()?;
+                        let bytes = super::hex_decode(value_str)?;
                         ProtoValue::Bytes(bytes)
                     }
                     "f64" => {

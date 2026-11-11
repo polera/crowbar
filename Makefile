@@ -1,4 +1,4 @@
-.PHONY: checks lint audit tools help release clean \
+.PHONY: checks lint fmt test audit tools help release clean \
        linux-amd64 linux-arm64 macos-amd64 macos-arm64 \
        freebsd-amd64 freebsd-arm64 openbsd-amd64 openbsd-arm64
 
@@ -10,10 +10,16 @@ CROSS := cross
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-checks: lint audit ## Run all checks (lint + audit)
+checks: fmt test lint audit ## Run formatting, tests, lint, and security audit
+
+fmt: ## Check formatting
+	cargo fmt --all -- --check
+
+test: ## Run all tests
+	cargo test --locked --all-targets
 
 lint: ## Run clippy lints
-	cargo clippy -- -D warnings
+	cargo clippy --locked --all-targets -- -D warnings
 
 audit: tools ## Run cargo audit
 	cargo audit

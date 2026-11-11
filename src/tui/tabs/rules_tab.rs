@@ -64,9 +64,9 @@ fn render_table(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, area
                 rule.name.clone(),
                 rule.target.label().to_string(),
                 rule.scope.label().to_string(),
-                truncate(&rule.match_pattern, 25),
+                truncate(rule.pattern(), 25),
                 truncate(&rule.replacement, 25),
-                if rule.is_regex { "yes" } else { "no" }.to_string(),
+                if rule.is_regex() { "yes" } else { "no" }.to_string(),
             ])
             .style(row_style)
         })
@@ -102,7 +102,7 @@ fn render_detail(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, are
     let replacement_style = field_style(app, RuleField::Replacement);
 
     let name_val = field_value(app, RuleField::Name, &rule.name);
-    let pattern_val = field_value(app, RuleField::Pattern, &rule.match_pattern);
+    let pattern_val = field_value(app, RuleField::Pattern, rule.pattern());
     let replacement_val = field_value(app, RuleField::Replacement, &rule.replacement);
 
     let label = Style::default().fg(Color::Cyan);
@@ -126,7 +126,7 @@ fn render_detail(app: &App, rules: &[crate::rules::Rule], frame: &mut Frame, are
             Span::styled("  Scope: ", label),
             Span::raw(rule.scope.label()),
             Span::styled("  Regex: ", label),
-            Span::raw(if rule.is_regex { "yes" } else { "no" }),
+            Span::raw(if rule.is_regex() { "yes" } else { "no" }),
         ]),
     ];
 

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -12,8 +13,8 @@ use hyper::client::conn::http1::Builder as ClientBuilder;
 use hyper::server::conn::http1::Builder as ServerBuilder;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::sync::mpsc;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_util::sync::PollSender;
 use tracing::{debug, error, warn};
 
 use crate::channel::ProxyToUi;
@@ -47,7 +48,7 @@ async fn run_tunnel(
     let acceptor = TlsAcceptor::from(server_config);
 
     let client_stream = TokioIo::new(upgraded);
-    let tls_stream = acceptor.accept(client_stream).await?;
+    let tls_stream = crate::proxy::io_timeout(acceptor.accept(client_stream)).await?;
 
     let is_h2 = tls_stream
         .get_ref()
@@ -80,6 +81,8 @@ async fn run_h1_tunnel(
     ServerBuilder::new()
         .preserve_header_case(true)
         .title_case_headers(true)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(crate::proxy::IO_TIMEOUT)
         .serve_connection(TokioIo::new(tls_stream), svc)
         .with_upgrades()
         .await?;
@@ -120,7 +123,7 @@ async fn handle_websocket_upgrade(
 
     let full_uri = format!(
         "wss://{}{}",
-        host,
+        crate::proxy::format_authority(host, port, 443),
         req.uri()
             .path_and_query()
             .map(|pq| pq.as_str())
@@ -141,10 +144,13 @@ async fn handle_websocket_upgrade(
     };
 
     if in_scope {
-        let _ = ctx.ui_tx.try_send(ProxyToUi::RequestCaptured(request_data));
+        let _ = ctx
+            .ui_tx
+            .send(ProxyToUi::RequestCaptured(request_data))
+            .await;
     }
 
-    let client_config = crate::tls::build_tls_client_config();
+    let client_config = ctx.tls_client_config.clone();
 
     let tcp = match crate::proxy::connect_tcp(host, port).await {
         Ok(s) => s,
@@ -153,10 +159,8 @@ async fn handle_websocket_upgrade(
                 "WebSocket: failed to connect to upstream {}:{}: {}",
                 host, port, e
             );
-            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                request_id,
-                format!("Connection failed: {}", e),
-            ));
+            ctx.report_error(request_id, format!("Connection failed: {e}"))
+                .await;
             return Ok(crate::proxy::bad_gateway(&format!(
                 "Connection failed: {}",
                 e
@@ -166,17 +170,15 @@ async fn handle_websocket_upgrade(
 
     let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
-    let tls_stream = match connector.connect(server_name, tcp).await {
+    let tls_stream = match crate::proxy::io_timeout(connector.connect(server_name, tcp)).await {
         Ok(s) => s,
         Err(e) => {
             warn!(
                 "WebSocket: TLS handshake failed with {}:{}: {}",
                 host, port, e
             );
-            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                request_id,
-                format!("TLS handshake failed: {}", e),
-            ));
+            ctx.report_error(request_id, format!("TLS handshake failed: {e}"))
+                .await;
             return Ok(crate::proxy::bad_gateway(&format!(
                 "TLS handshake failed: {}",
                 e
@@ -201,8 +203,8 @@ async fn handle_websocket_upgrade(
         }
     };
 
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
+    ctx.spawn(async move {
+        if let Err(e) = conn.with_upgrades().await {
             debug!("WebSocket upstream connection ended: {}", e);
         }
     });
@@ -219,16 +221,21 @@ async fn handle_websocket_upgrade(
         .version(req.version());
 
     for (key, value) in crate::proxy::end_to_end_headers(&headers, true) {
-        upstream_req = upstream_req.header(key.as_str(), value.as_str());
+        let value = match crate::http::models::header_value(value) {
+            Ok(value) => value,
+            Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
+        };
+        upstream_req = upstream_req.header(key.as_str(), value);
     }
 
     let client_req_for_upgrade = req;
 
-    let upstream_req = upstream_req
-        .body(Full::new(Bytes::new()))
-        .expect("building websocket upgrade request");
+    let upstream_req = match upstream_req.body(Full::new(Bytes::new())) {
+        Ok(request) => request,
+        Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
+    };
 
-    let upstream_resp = match sender.send_request(upstream_req).await {
+    let upstream_resp = match crate::proxy::io_timeout(sender.send_request(upstream_req)).await {
         Ok(resp) => resp,
         Err(e) => {
             warn!("WebSocket: upstream request failed: {}", e);
@@ -239,19 +246,15 @@ async fn handle_websocket_upgrade(
     let resp_status = upstream_resp.status().as_u16();
 
     if resp_status != 101 {
-        let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
-        let resp_body = upstream_resp.into_body();
-        let resp_body = http_body_util::Limited::new(resp_body, ctx.limits.max_body_bytes)
-            .collect()
-            .await
-            .map(|b| b.to_bytes())
-            .unwrap_or_default();
-
-        let mut response = hyper::Response::builder().status(resp_status);
-        for (key, value) in &resp_headers {
-            response = response.header(key.as_str(), value.as_str());
-        }
-        return Ok(response.body(Full::new(resp_body)).unwrap());
+        return Ok(crate::proxy::process_h1_response(
+            upstream_resp,
+            request_id,
+            "GET",
+            TimingContext::new(),
+            in_scope,
+            ctx,
+        )
+        .await);
     }
 
     let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
@@ -269,14 +272,15 @@ async fn handle_websocket_upgrade(
     if in_scope {
         let _ = ctx
             .ui_tx
-            .try_send(ProxyToUi::ResponseReceived(request_id, response_data));
+            .send(ProxyToUi::ResponseReceived(request_id, response_data))
+            .await;
     }
 
     let ui_tx_clone = ctx.ui_tx.clone();
     let host_owned = host.to_string();
     let max_ws_frame_bytes = ctx.limits.max_ws_frame_bytes;
 
-    tokio::spawn(async move {
+    ctx.spawn(async move {
         let upstream_upgraded = match hyper::upgrade::on(upstream_resp).await {
             Ok(u) => u,
             Err(e) => {
@@ -309,12 +313,10 @@ async fn handle_websocket_upgrade(
         .await;
     });
 
-    let mut response = hyper::Response::builder().status(101);
-    for (key, value) in &resp_headers {
-        response = response.header(key.as_str(), value.as_str());
-    }
-
-    Ok(response.body(Full::new(Bytes::new())).unwrap())
+    Ok(
+        crate::proxy::build_response(101, &resp_headers, Full::new(Bytes::new()), true)
+            .unwrap_or_else(|error| crate::proxy::bad_gateway(&error.to_string())),
+    )
 }
 
 async fn handle_http_request(
@@ -333,13 +335,17 @@ async fn handle_http_request(
     let headers = crate::http::models::extract_headers(req.headers());
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match http_body_util::Limited::new(body, ctx.limits.max_body_bytes)
-        .collect()
-        .await
+    let body_bytes = match crate::proxy::io_timeout(
+        http_body_util::Limited::new(body, ctx.limits.max_body_bytes).collect(),
+    )
+    .await
     {
         Ok(b) => b.to_bytes(),
         Err(e) => {
             warn!("Failed to read request body: {}", e);
+            if e.root_cause().is::<http_body_util::LengthLimitError>() {
+                return Ok(crate::proxy::payload_too_large());
+            }
             return Ok(crate::proxy::bad_gateway(&format!(
                 "Failed to read request body: {}",
                 e
@@ -349,7 +355,7 @@ async fn handle_http_request(
 
     let full_uri = format!(
         "https://{}{}",
-        host,
+        crate::proxy::format_authority(host, port, 443),
         parts
             .uri
             .path_and_query()
@@ -373,9 +379,18 @@ async fn handle_http_request(
     if in_scope {
         let _ = ctx
             .ui_tx
-            .try_send(ProxyToUi::RequestCaptured(request_data.clone()));
+            .send(ProxyToUi::RequestCaptured(request_data.clone()))
+            .await;
 
-        if let Some(rx) = ctx.intercept.intercept_request(&request_data, &ctx.ui_tx) {
+        let decision = match ctx
+            .intercept
+            .intercept_request(&request_data, &ctx.ui_tx)
+            .await
+        {
+            Ok(decision) => decision,
+            Err(error) => return Ok(crate::proxy::service_unavailable(&error.to_string())),
+        };
+        if let Some(rx) = decision {
             match rx.await {
                 Ok(InterceptDecision::Drop) => {
                     return Ok(hyper::Response::builder()
@@ -387,7 +402,11 @@ async fn handle_http_request(
                     request_data = edited;
                 }
                 Ok(InterceptDecision::Forward) => {}
-                Err(_) => {}
+                Err(_) => {
+                    return Ok(crate::proxy::service_unavailable(
+                        "Interceptor disconnected",
+                    ));
+                }
             }
         }
     }
@@ -410,7 +429,7 @@ async fn handle_http_request(
             Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
         };
 
-    let client_config = crate::tls::build_tls_client_config();
+    let client_config = ctx.tls_client_config.clone();
 
     let tcp = match crate::proxy::connect_tcp(&target.host, target.port).await {
         Ok(s) => {
@@ -422,10 +441,8 @@ async fn handle_http_request(
                 "Failed to connect to upstream {}:{}: {}",
                 target.host, target.port, e
             );
-            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                request_id,
-                format!("Connection failed: {}", e),
-            ));
+            ctx.report_error(request_id, format!("Connection failed: {e}"))
+                .await;
             return Ok(crate::proxy::bad_gateway(&format!(
                 "Connection failed: {}",
                 e
@@ -433,9 +450,21 @@ async fn handle_http_request(
         }
     };
 
+    if !target.uses_tls(request_data.is_tls) {
+        return Ok(crate::proxy::forward_h1(
+            TokioIo::new(tcp),
+            request_data.version.into(),
+            &target.path_and_query,
+            &request_data,
+            timing,
+            in_scope,
+            ctx,
+        )
+        .await);
+    }
     let server_name = crate::tls::server_name_or_localhost(&target.host);
     let connector = TlsConnector::from(client_config);
-    let tls_stream = match connector.connect(server_name, tcp).await {
+    let tls_stream = match crate::proxy::io_timeout(connector.connect(server_name, tcp)).await {
         Ok(s) => {
             timing.tls_done = Some(Instant::now());
             s
@@ -445,10 +474,8 @@ async fn handle_http_request(
                 "TLS handshake failed with {}:{}: {}",
                 target.host, target.port, e
             );
-            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                request_id,
-                format!("TLS handshake failed: {}", e),
-            ));
+            ctx.report_error(request_id, format!("TLS handshake failed: {e}"))
+                .await;
             return Ok(crate::proxy::bad_gateway(&format!(
                 "TLS handshake failed: {}",
                 e
@@ -459,7 +486,7 @@ async fn handle_http_request(
     let io = TokioIo::new(tls_stream);
     Ok(crate::proxy::forward_h1(
         io,
-        parts.version,
+        request_data.version.into(),
         &target.path_and_query,
         &request_data,
         timing,
@@ -519,49 +546,134 @@ struct GrpcTeeBody {
     inner: Incoming,
     request_id: RequestId,
     direction: GrpcDirection,
-    ui_tx: mpsc::Sender<ProxyToUi>,
+    ui_tx: PollSender<ProxyToUi>,
+    events: VecDeque<ProxyToUi>,
+    pending_frame: Option<Frame<Bytes>>,
     buffer: BytesMut,
     in_scope: bool,
     max_message_bytes: usize,
+    capture_enabled: bool,
+    idle: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl GrpcTeeBody {
+    fn new(
+        inner: Incoming,
+        request_id: RequestId,
+        direction: GrpcDirection,
+        in_scope: bool,
+        ctx: &ProxyContext,
+    ) -> Self {
+        Self {
+            inner,
+            request_id,
+            direction,
+            ui_tx: PollSender::new(ctx.ui_tx.clone()),
+            events: VecDeque::new(),
+            pending_frame: None,
+            buffer: BytesMut::new(),
+            in_scope,
+            max_message_bytes: ctx.limits.max_body_bytes,
+            capture_enabled: true,
+            idle: Box::pin(tokio::time::sleep(crate::proxy::IO_TIMEOUT)),
+        }
+    }
 }
 
 impl http_body::Body for GrpcTeeBody {
     type Data = Bytes;
-    type Error = hyper::Error;
+    type Error = BoxError;
 
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
         let this = self.get_mut();
+        while !this.events.is_empty() {
+            match this.ui_tx.poll_reserve(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(_)) => {
+                    this.events.clear();
+                    this.in_scope = false;
+                    break;
+                }
+                Poll::Ready(Ok(())) => {
+                    let event = this.events.pop_front().expect("queue is not empty");
+                    let _ = this.ui_tx.send_item(event);
+                }
+            }
+        }
+        if let Some(frame) = this.pending_frame.take() {
+            return Poll::Ready(Some(Ok(frame)));
+        }
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
+                this.idle
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + crate::proxy::IO_TIMEOUT);
                 if this.in_scope {
-                    if let Some(data) = frame.data_ref() {
+                    if this.capture_enabled
+                        && let Some(data) = frame.data_ref()
+                    {
                         this.buffer.extend_from_slice(data);
-                        extract_grpc_messages(
+                        this.capture_enabled = extract_grpc_messages(
                             &mut this.buffer,
                             this.request_id,
                             this.direction,
-                            &this.ui_tx,
+                            &mut this.events,
                             this.max_message_bytes,
                         );
+                        if !this.capture_enabled && this.direction == GrpcDirection::ClientToServer
+                        {
+                            this.events
+                                .push_back(ProxyToUi::RequestCaptureTruncated(this.request_id));
+                        }
                     }
-                    if let Some(trailers) = frame.trailers_ref() {
+                    if this.direction == GrpcDirection::ServerToClient
+                        && let Some(trailers) = frame.trailers_ref()
+                    {
                         let pairs = crate::http::models::extract_trailers(Some(trailers));
-                        let _ = this
-                            .ui_tx
-                            .try_send(ProxyToUi::GrpcTrailers(this.request_id, pairs));
+                        this.events
+                            .push_back(ProxyToUi::GrpcTrailers(this.request_id, pairs));
                     }
                 }
-                Poll::Ready(Some(Ok(frame)))
+                // Flush associated events before exposing even the final data/trailer
+                // frame, so backpressure cannot silently produce a partial replay.
+                this.pending_frame = Some(frame);
+                Pin::new(this).poll_frame(cx)
             }
-            other => other,
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(Box::new(error)))),
+            Poll::Ready(None) => {
+                if this.in_scope
+                    && this.direction == GrpcDirection::ClientToServer
+                    && !this.buffer.is_empty()
+                {
+                    this.buffer.clear();
+                    this.events
+                        .push_back(ProxyToUi::RequestCaptureTruncated(this.request_id));
+                    Pin::new(this).poll_frame(cx)
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+            Poll::Pending => {
+                if std::future::Future::poll(this.idle.as_mut(), cx).is_ready() {
+                    Poll::Ready(Some(Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "gRPC stream idle timeout",
+                    )))))
+                } else {
+                    Poll::Pending
+                }
+            }
         }
     }
 
     fn is_end_stream(&self) -> bool {
         self.inner.is_end_stream()
+            && self.pending_frame.is_none()
+            && self.events.is_empty()
+            && self.buffer.is_empty()
     }
 }
 
@@ -569,19 +681,19 @@ fn extract_grpc_messages(
     buffer: &mut BytesMut,
     request_id: RequestId,
     direction: GrpcDirection,
-    ui_tx: &mpsc::Sender<ProxyToUi>,
+    events: &mut VecDeque<ProxyToUi>,
     max_message_bytes: usize,
-) {
+) -> bool {
     while buffer.len() >= 5 {
         let compressed = buffer[0] != 0;
         let len = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
         if len > max_message_bytes {
             buffer.clear();
-            return;
+            return false;
         }
         let Some(frame_len) = 5usize.checked_add(len) else {
             buffer.clear();
-            return;
+            return false;
         };
         if buffer.len() < frame_len {
             break;
@@ -595,8 +707,9 @@ fn extract_grpc_messages(
             payload,
             timestamp: std::time::SystemTime::now(),
         };
-        let _ = ui_tx.try_send(ProxyToUi::GrpcFrame(request_id, msg));
+        events.push_back(ProxyToUi::GrpcFrame(request_id, msg));
     }
+    true
 }
 
 enum H2RespBody {
@@ -619,9 +732,7 @@ impl http_body::Body for H2RespBody {
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
             },
-            H2RespBody::Streaming(body) => Pin::new(body)
-                .poll_frame(cx)
-                .map(|opt| opt.map(|res| res.map_err(|e| Box::new(e) as BoxError))),
+            H2RespBody::Streaming(body) => Pin::new(body).poll_frame(cx),
         }
     }
 
@@ -639,7 +750,7 @@ async fn run_h2_tunnel(
     port: u16,
     ctx: ProxyContext,
 ) -> anyhow::Result<()> {
-    let upstream_sender = match establish_h2_upstream(host, port).await {
+    let upstream_sender = match establish_h2_upstream(host, port, &ctx).await {
         Ok(s) => s,
         Err(e) => {
             warn!(
@@ -668,21 +779,22 @@ async fn run_h2_tunnel(
 async fn establish_h2_upstream(
     host: &str,
     port: u16,
-) -> anyhow::Result<hyper::client::conn::http2::SendRequest<Full<Bytes>>> {
-    let client_config = crate::tls::build_tls_h2_client_config();
+    ctx: &ProxyContext,
+) -> anyhow::Result<hyper::client::conn::http2::SendRequest<H2RespBody>> {
+    let client_config = ctx.tls_h2_client_config.clone();
 
     let tcp = crate::proxy::connect_tcp(host, port).await?;
 
     let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
-    let tls_stream = connector.connect(server_name, tcp).await?;
+    let tls_stream = crate::proxy::io_timeout(connector.connect(server_name, tcp)).await?;
 
     let io = TokioIo::new(tls_stream);
     let (sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
         .handshake(io)
         .await?;
 
-    tokio::spawn(async move {
+    ctx.spawn(async move {
         if let Err(e) = conn.await {
             debug!("H2 upstream connection ended: {}", e);
         }
@@ -696,7 +808,7 @@ async fn handle_h2_request(
     host: &str,
     port: u16,
     ctx: &ProxyContext,
-    mut upstream: hyper::client::conn::http2::SendRequest<Full<Bytes>>,
+    mut upstream: hyper::client::conn::http2::SendRequest<H2RespBody>,
 ) -> Result<hyper::Response<H2RespBody>, Infallible> {
     let in_scope = ctx.scope.is_in_scope(host);
     let request_id = RequestId::next();
@@ -708,17 +820,24 @@ async fn handle_h2_request(
     let headers = crate::http::models::extract_headers(req.headers());
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match http_body_util::Limited::new(body, ctx.limits.max_body_bytes)
-        .collect()
+    let mut streaming_body = None;
+    let body_bytes = if is_grpc {
+        streaming_body = Some(body);
+        Bytes::new()
+    } else {
+        match crate::proxy::io_timeout(
+            http_body_util::Limited::new(body, ctx.limits.max_body_bytes).collect(),
+        )
         .await
-    {
-        Ok(b) => b.to_bytes(),
-        Err(e) => {
-            warn!("Failed to read h2 request body: {}", e);
-            return Ok(h2_bad_gateway(&format!(
-                "Failed to read request body: {}",
-                e
-            )));
+        {
+            Ok(b) => b.to_bytes(),
+            Err(e) => {
+                warn!("Failed to read h2 request body: {}", e);
+                return Ok(h2_bad_gateway(&format!(
+                    "Failed to read request body: {}",
+                    e
+                )));
+            }
         }
     };
 
@@ -728,7 +847,11 @@ async fn handle_h2_request(
         .map(|pq| pq.as_str())
         .unwrap_or("/");
 
-    let full_uri = format!("https://{}{}", host, path_and_query);
+    let full_uri = format!(
+        "https://{}{}",
+        crate::proxy::format_authority(host, port, 443),
+        path_and_query
+    );
 
     let mut request_data = RequestData {
         id: request_id,
@@ -744,22 +867,24 @@ async fn handle_h2_request(
     };
 
     if in_scope {
-        if is_grpc && !body_bytes.is_empty() {
-            let mut buf = BytesMut::from(body_bytes.as_ref());
-            extract_grpc_messages(
-                &mut buf,
-                request_id,
-                GrpcDirection::ClientToServer,
-                &ctx.ui_tx,
-                ctx.limits.max_body_bytes,
-            );
-        }
-
         let _ = ctx
             .ui_tx
-            .try_send(ProxyToUi::RequestCaptured(request_data.clone()));
+            .send(ProxyToUi::RequestCaptured(request_data.clone()))
+            .await;
 
-        if !is_grpc && let Some(rx) = ctx.intercept.intercept_request(&request_data, &ctx.ui_tx) {
+        let decision = if !is_grpc {
+            match ctx
+                .intercept
+                .intercept_request(&request_data, &ctx.ui_tx)
+                .await
+            {
+                Ok(decision) => decision,
+                Err(error) => return Ok(h2_bad_gateway(&error.to_string())),
+            }
+        } else {
+            None
+        };
+        if let Some(rx) = decision {
             match rx.await {
                 Ok(InterceptDecision::Drop) => {
                     return Ok(hyper::Response::builder()
@@ -774,7 +899,7 @@ async fn handle_h2_request(
                     request_data = edited;
                 }
                 Ok(InterceptDecision::Forward) => {}
-                Err(_) => {}
+                Err(_) => return Ok(h2_bad_gateway("Interceptor disconnected")),
             }
         }
     }
@@ -793,12 +918,17 @@ async fn handle_h2_request(
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("host"))
         .map_or(host, |(_, value)| value.as_str());
+    if request_data.body.len() > ctx.limits.max_body_bytes {
+        return Ok(h2_bad_gateway(
+            "Rewritten request body exceeds configured limit",
+        ));
+    }
     let target =
         match crate::proxy::resolve_upstream_target(&request_data.uri, fallback_authority, port) {
             Ok(target) => target,
             Err(error) => return Ok(h2_bad_gateway(&error.to_string())),
         };
-    if !target.host.eq_ignore_ascii_case(host) || target.port != port {
+    if !target.host.eq_ignore_ascii_case(host) || target.port != port || !target.uses_tls(true) {
         return Ok(h2_bad_gateway(
             "Changing authority is not supported on an existing HTTP/2 tunnel",
         ));
@@ -815,15 +945,32 @@ async fn handle_h2_request(
         Ok(request) => request,
         Err(error) => return Ok(h2_bad_gateway(&format!("Invalid edited request: {error}"))),
     };
+    let (mut upstream_parts, _) = upstream_req.into_parts();
+    let upstream_body = if let Some(body) = streaming_body {
+        upstream_parts
+            .headers
+            .insert(http::header::TE, http::HeaderValue::from_static("trailers"));
+        H2RespBody::Streaming(GrpcTeeBody::new(
+            body,
+            request_id,
+            GrpcDirection::ClientToServer,
+            in_scope,
+            ctx,
+        ))
+    } else {
+        H2RespBody::Buffered(H2Body {
+            data: Some(request_data.body.clone()),
+            trailers: None,
+        })
+    };
+    let upstream_req = Request::from_parts(upstream_parts, upstream_body);
 
-    let upstream_resp = match upstream.send_request(upstream_req).await {
+    let upstream_resp = match crate::proxy::io_timeout(upstream.send_request(upstream_req)).await {
         Ok(resp) => resp,
         Err(e) => {
             warn!("H2 upstream request to {}:{} failed: {}", host, port, e);
-            let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                request_id,
-                format!("Request failed: {}", e),
-            ));
+            ctx.report_error(request_id, format!("Request failed: {e}"))
+                .await;
             return Ok(h2_bad_gateway(&format!("Request failed: {}", e)));
         }
     };
@@ -840,7 +987,8 @@ async fn handle_h2_request(
             request_id,
             in_scope,
             ctx,
-        ));
+        )
+        .await);
     }
 
     build_buffered_response(
@@ -848,14 +996,14 @@ async fn handle_h2_request(
         resp_status,
         resp_headers,
         timing,
-        request_id,
+        &request_data,
         in_scope,
         ctx,
     )
     .await
 }
 
-fn build_grpc_response(
+async fn build_grpc_response(
     upstream_resp: hyper::Response<Incoming>,
     resp_status: u16,
     resp_headers: Vec<(String, String)>,
@@ -881,25 +1029,25 @@ fn build_grpc_response(
         };
         let _ = ctx
             .ui_tx
-            .try_send(ProxyToUi::ResponseReceived(request_id, response_data));
+            .send(ProxyToUi::ResponseReceived(request_id, response_data))
+            .await;
     }
 
     let (_, resp_body_incoming) = upstream_resp.into_parts();
-    let resp_tee = GrpcTeeBody {
-        inner: resp_body_incoming,
+    let resp_tee = GrpcTeeBody::new(
+        resp_body_incoming,
         request_id,
-        direction: GrpcDirection::ServerToClient,
-        ui_tx: ctx.ui_tx.clone(),
-        buffer: BytesMut::new(),
+        GrpcDirection::ServerToClient,
         in_scope,
-        max_message_bytes: ctx.limits.max_body_bytes,
-    };
-
-    let mut response = hyper::Response::builder().status(resp_status);
-    for (key, value) in &resp_headers {
-        response = response.header(key.as_str(), value.as_str());
-    }
-    response.body(H2RespBody::Streaming(resp_tee)).unwrap()
+        ctx,
+    );
+    crate::proxy::build_response(
+        resp_status,
+        &resp_headers,
+        H2RespBody::Streaming(resp_tee),
+        false,
+    )
+    .unwrap_or_else(|error| h2_bad_gateway(&format!("Invalid upstream response: {error}")))
 }
 
 async fn build_buffered_response(
@@ -907,29 +1055,28 @@ async fn build_buffered_response(
     resp_status: u16,
     resp_headers: Vec<(String, String)>,
     mut timing: TimingContext,
-    request_id: RequestId,
+    request: &RequestData,
     in_scope: bool,
     ctx: &ProxyContext,
 ) -> Result<hyper::Response<H2RespBody>, Infallible> {
+    let request_id = request.id;
     timing.first_byte = Some(Instant::now());
 
     let (_, resp_body_incoming) = upstream_resp.into_parts();
     let body_start = Instant::now();
-    let collected =
-        match http_body_util::Limited::new(resp_body_incoming, ctx.limits.max_body_bytes)
-            .collect()
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to read h2 upstream response body: {}", e);
-                let _ = ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                    request_id,
-                    format!("Response body error: {}", e),
-                ));
-                return Ok(h2_bad_gateway(&format!("Response body error: {}", e)));
-            }
-        };
+    let collected = match crate::proxy::io_timeout(
+        http_body_util::Limited::new(resp_body_incoming, ctx.limits.max_body_bytes).collect(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to read h2 upstream response body: {}", e);
+            ctx.report_error(request_id, format!("Response body error: {e}"))
+                .await;
+            return Ok(h2_bad_gateway(&format!("Response body error: {}", e)));
+        }
+    };
     let content_transfer = body_start.elapsed();
 
     let resp_trailers = collected.trailers().cloned();
@@ -940,6 +1087,40 @@ async fn build_buffered_response(
 
     let mut resp_headers_mut = resp_headers;
     rules::apply_response_rules(&ctx.rules, &mut resp_headers_mut, &mut resp_body);
+    if resp_body.len() > ctx.limits.max_body_bytes {
+        return Ok(h2_bad_gateway(
+            "Rewritten response body exceeds configured limit",
+        ));
+    }
+    crate::proxy::normalize_response_headers(
+        &mut resp_headers_mut,
+        resp_body.len(),
+        &request.method,
+        resp_status,
+    );
+    let response = match crate::proxy::build_response(
+        resp_status,
+        &resp_headers_mut,
+        H2RespBody::Buffered(H2Body {
+            data: Some(resp_body.clone()),
+            trailers: resp_trailers,
+        }),
+        false,
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = ctx
+                .ui_tx
+                .send(ProxyToUi::RequestError(
+                    request_id,
+                    format!("Invalid rewritten response: {error}"),
+                ))
+                .await;
+            return Ok(h2_bad_gateway(&format!(
+                "Invalid rewritten response: {error}"
+            )));
+        }
+    };
 
     let timing_data = timing.finish(Some(content_transfer));
 
@@ -957,18 +1138,123 @@ async fn build_buffered_response(
     if in_scope {
         let _ = ctx
             .ui_tx
-            .try_send(ProxyToUi::ResponseReceived(request_id, response_data));
+            .send(ProxyToUi::ResponseReceived(request_id, response_data))
+            .await;
     }
 
-    let mut response = hyper::Response::builder().status(resp_status);
-    for (key, value) in &resp_headers_mut {
-        response = response.header(key.as_str(), value.as_str());
+    Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn h2_rewrite(scope: crate::rules::RuleScope, replacement: &str) {
+        let (ctx, mut events) = crate::test_support::context(crate::proxy::ProxyLimits::default());
+        let mut rule = crate::rules::Rule::new("rewrite".into());
+        rule.scope = scope;
+        rule.set_pattern("foo".into()).unwrap();
+        rule.replacement = replacement.into();
+        ctx.rules.write().push(rule);
+        let (upstream_io, server_io) = tokio::io::duplex(4096);
+        let expected = replacement.to_string();
+        let upstream_server = tokio::spawn(async move {
+            let service = service_fn(move |request: Request<Incoming>| {
+                let expected = expected.clone();
+                async move {
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    if scope == crate::rules::RuleScope::Body {
+                        assert_eq!(body.as_ref(), expected.as_bytes());
+                    }
+                    Ok::<_, Infallible>(
+                        hyper::Response::builder()
+                            .header("x-test", "foo")
+                            .header("content-length", "3")
+                            .body(Full::new(Bytes::from_static(b"foo")))
+                            .unwrap(),
+                    )
+                }
+            });
+            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(server_io), service)
+                .await;
+        });
+        let (upstream, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .handshake(TokioIo::new(upstream_io))
+            .await
+            .unwrap();
+        let upstream_driver = tokio::spawn(connection);
+        let (client_io, proxy_io) = tokio::io::duplex(4096);
+        let proxy_server = tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let ctx = ctx.clone();
+                let upstream = upstream.clone();
+                async move { handle_h2_request(request, "example.com", 443, &ctx, upstream).await }
+            });
+            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(proxy_io), service)
+                .await;
+        });
+        let (mut client, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .handshake(TokioIo::new(client_io))
+                .await
+                .unwrap();
+        let client_driver = tokio::spawn(connection);
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://example.com/")
+            .header("content-length", "3")
+            .body(Full::new(Bytes::from_static(b"foo")))
+            .unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.send_request(request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if scope == crate::rules::RuleScope::Body {
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.headers()["content-length"],
+                replacement.len().to_string()
+            );
+            assert_eq!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .as_ref(),
+                replacement.as_bytes()
+            );
+        } else {
+            assert_eq!(response.status(), 502);
+            assert!(matches!(
+                events.recv().await,
+                Some(ProxyToUi::RequestCaptured(_))
+            ));
+            assert!(matches!(
+                events.recv().await,
+                Some(ProxyToUi::RequestError(_, _))
+            ));
+        }
+        client_driver.abort();
+        proxy_server.abort();
+        upstream_driver.abort();
+        upstream_server.abort();
     }
 
-    Ok(response
-        .body(H2RespBody::Buffered(H2Body {
-            data: Some(resp_body),
-            trailers: resp_trailers,
-        }))
-        .unwrap())
+    #[tokio::test]
+    async fn h2_rewrites_update_framing_for_growing_and_shrinking_bodies() {
+        h2_rewrite(crate::rules::RuleScope::Body, "longer").await;
+        h2_rewrite(crate::rules::RuleScope::Body, "x").await;
+    }
+
+    #[tokio::test]
+    async fn invalid_rewritten_h2_headers_return_502_without_panicking() {
+        h2_rewrite(crate::rules::RuleScope::Headers, "bad\r\nvalue").await;
+    }
 }

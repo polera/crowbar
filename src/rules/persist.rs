@@ -65,8 +65,18 @@ fn write_rules_file(path: &Path, rules: &RulesFile) -> anyhow::Result<()> {
 }
 
 pub fn load(path: &Path) -> anyhow::Result<Vec<Rule>> {
-    let json = std::fs::read_to_string(path)?;
-    let file: RulesFile = serde_json::from_str(&json)?;
+    use anyhow::Context;
+    let json = crate::http::session::read_input(path)?;
+    let file: RulesFile = serde_json::from_slice(&json)?;
+    anyhow::ensure!(
+        file.version == 1,
+        "Unsupported rules version {}",
+        file.version
+    );
+    for rule in &file.rules {
+        rule.validate()
+            .with_context(|| format!("Invalid regex in rule {:?}", rule.name))?;
+    }
     Ok(file.rules)
 }
 
@@ -81,6 +91,17 @@ pub fn auto_save_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::safe_name;
+
+    #[test]
+    fn validation_rejects_invalid_regexes_and_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rules.json");
+        std::fs::write(&path, r#"{"version":1,"rules":[{"name":"bad","enabled":true,"target":"Both","scope":"All","match_pattern":"[","replacement":"","is_regex":true}]}"#).unwrap();
+        let error = super::load(&path).unwrap_err();
+        assert!(format!("{error:#}").contains("bad"));
+        std::fs::write(&path, r#"{"version":99,"rules":[]}"#).unwrap();
+        assert!(super::load(&path).is_err());
+    }
 
     #[test]
     fn accepts_plain_names() {

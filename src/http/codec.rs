@@ -1,7 +1,22 @@
+use base64::Engine;
 use bytes::Bytes;
 
 use super::models::RequestData;
 use super::protobuf;
+
+const BASE64_MARKER: &str = "[crowbar:base64]";
+
+#[derive(Debug, thiserror::Error)]
+pub enum EditError {
+    #[error("Expected METHOD URI HTTP/VERSION on the first line")]
+    StartLine,
+    #[error("Invalid header line: {0}")]
+    Header(String),
+    #[error("Invalid request: {0}")]
+    Request(#[from] http::Error),
+    #[error("Invalid edited body: {0}")]
+    Body(&'static str),
+}
 
 pub fn request_to_lines(req: &RequestData) -> Vec<String> {
     let mut lines = Vec::new();
@@ -14,17 +29,21 @@ pub fn request_to_lines(req: &RequestData) -> Vec<String> {
     if !req.body.is_empty() {
         lines.push(String::new());
 
-        if req.is_grpc {
+        if let Some(messages) = req
+            .is_grpc
+            .then(|| protobuf::decode_grpc_body(&req.body))
+            .filter(|messages| {
+                !messages.is_empty()
+                    && messages
+                        .iter()
+                        .all(|message| !message.compressed && message.fields.is_some())
+            })
+        {
             let proto_type = crate::http::proto_schema::request_type(&req.uri);
-            let messages = protobuf::decode_grpc_body(&req.body);
             let payloads = grpc_payloads(&req.body);
             for (i, msg) in messages.iter().enumerate() {
                 if i > 0 {
                     lines.push("---".to_string());
-                }
-                if msg.compressed {
-                    lines.push(format!("[compressed: {} bytes]", msg.size));
-                    continue;
                 }
                 // Prefer schema decode of the raw payload when a type resolves.
                 let schema_lines = proto_type.as_ref().and_then(|desc| {
@@ -40,29 +59,46 @@ pub fn request_to_lines(req: &RequestData) -> Vec<String> {
                     lines.push(format!("[binary: {} bytes]", msg.size));
                 }
             }
-        } else if let Ok(text) = std::str::from_utf8(&req.body) {
-            lines.extend(text.lines().map(String::from));
+        } else if !req.is_grpc
+            && let Ok(text) = std::str::from_utf8(&req.body)
+        {
+            lines.extend(
+                text.split('\n')
+                    .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string()),
+            );
         } else {
-            lines.push(format!("[binary: {} bytes]", req.body.len()));
+            lines.push(BASE64_MARKER.into());
+            lines.push(base64::engine::general_purpose::STANDARD.encode(&req.body));
         }
     }
 
     lines
 }
 
-pub fn lines_to_request(lines: &[String], original: &RequestData) -> RequestData {
+pub fn lines_to_request(
+    lines: &[String],
+    original: &RequestData,
+) -> Result<RequestData, EditError> {
     let mut headers = Vec::new();
     let mut body_lines = Vec::new();
     let mut in_body = false;
     let mut method = original.method.clone();
     let mut uri = original.uri.clone();
+    let mut version = original.version;
 
     for (i, line) in lines.iter().enumerate() {
         if i == 0 {
-            let parts: Vec<&str> = line.splitn(3, ' ').collect();
-            if parts.len() >= 2 {
-                method = parts[0].to_string();
-                uri = parts[1].to_string();
+            let mut parts = line.split_whitespace();
+            method = parts.next().ok_or(EditError::StartLine)?.to_string();
+            uri = parts.next().ok_or(EditError::StartLine)?.to_string();
+            version = match parts.next() {
+                Some("HTTP/1.0") => super::models::HttpVersion::Http10,
+                Some("HTTP/1.1") => super::models::HttpVersion::Http11,
+                Some("HTTP/2" | "HTTP/2.0") => super::models::HttpVersion::Http2,
+                _ => return Err(EditError::StartLine),
+            };
+            if parts.next().is_some() {
+                return Err(EditError::StartLine);
             }
             continue;
         }
@@ -78,17 +114,43 @@ pub fn lines_to_request(lines: &[String], original: &RequestData) -> RequestData
         }
 
         if let Some((key, value)) = line.split_once(':') {
-            headers.push((key.trim().to_string(), value.trim().to_string()));
+            headers.push((
+                key.trim().to_string(),
+                value.strip_prefix(' ').unwrap_or(value).to_string(),
+            ));
+        } else {
+            return Err(EditError::Header(line.clone()));
         }
     }
 
-    let body = if body_lines.is_empty() {
+    if lines.is_empty() {
+        return Err(EditError::StartLine);
+    }
+    let original_lines = request_to_lines(original);
+    let original_body = original_lines
+        .iter()
+        .position(String::is_empty)
+        .map(|index| &original_lines[index + 1..])
+        .unwrap_or(&[]);
+    let body = if body_lines == original_body {
+        original.body.clone()
+    } else if body_lines.is_empty() {
         Bytes::new()
+    } else if body_lines[0] == BASE64_MARKER {
+        Bytes::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(body_lines[1..].join("").trim())
+                .map_err(|_| EditError::Body("invalid base64"))?,
+        )
     } else if original.is_grpc {
-        encode_grpc_body_lines(&body_lines, &uri)
-            .unwrap_or_else(|| Bytes::from(body_lines.join("\n")))
+        encode_grpc_body_lines(&body_lines, &uri).ok_or(EditError::Body("invalid protobuf text"))?
     } else {
-        Bytes::from(body_lines.join("\n"))
+        let separator = if original.body.windows(2).any(|pair| pair == b"\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        Bytes::from(body_lines.join(separator))
     };
 
     let host = headers
@@ -97,18 +159,28 @@ pub fn lines_to_request(lines: &[String], original: &RequestData) -> RequestData
         .map(|(_, v)| v.clone())
         .unwrap_or_else(|| original.host.clone());
 
-    RequestData {
+    // Validate at the editor boundary, rather than silently sending malformed edits.
+    crate::proxy::build_forwarding_request(&method, &uri, &headers, body.clone())?;
+    let is_tls = uri
+        .parse::<http::Uri>()
+        .ok()
+        .and_then(|uri| {
+            uri.scheme_str()
+                .map(|scheme| scheme == "https" || scheme == "wss")
+        })
+        .unwrap_or(original.is_tls);
+    Ok(RequestData {
         id: original.id,
         method,
         uri,
         host,
-        version: original.version,
+        version,
         headers,
         body,
-        is_tls: original.is_tls,
+        is_tls,
         is_grpc: original.is_grpc,
         timestamp: original.timestamp,
-    }
+    })
 }
 
 /// Split a gRPC body into per-frame payload slices (skipping the 5-byte header).
@@ -174,6 +246,66 @@ mod tests {
     use std::path::PathBuf;
     use std::time::SystemTime;
 
+    #[test]
+    fn unedited_and_header_only_edits_preserve_body_bytes() {
+        for body in [
+            b"abc\r\n".as_slice(),
+            b"one\r\ntwo\r\n",
+            b"\xff\x00",
+            b"",
+            b"a\n\n",
+            b"@file",
+        ] {
+            let mut request = crate::test_support::request();
+            request.body = Bytes::copy_from_slice(body);
+            let mut lines = request_to_lines(&request);
+            assert_eq!(
+                lines_to_request(&lines, &request).unwrap().body,
+                request.body
+            );
+            lines[0] = lines[0].replace("POST", "PUT");
+            assert_eq!(
+                lines_to_request(&lines, &request).unwrap().body,
+                request.body
+            );
+        }
+    }
+
+    #[test]
+    fn binary_and_compressed_grpc_use_explicit_base64_edits() {
+        let mut request = crate::test_support::request();
+        request.is_grpc = true;
+        request.body = Bytes::from_static(b"\x01\x00\x00\x00\x02hi");
+        let mut lines = request_to_lines(&request);
+        assert!(lines.iter().any(|line| line == BASE64_MARKER));
+        assert_eq!(
+            lines_to_request(&lines, &request).unwrap().body,
+            request.body
+        );
+        *lines.last_mut().unwrap() = "not base64!".into();
+        assert!(lines_to_request(&lines, &request).is_err());
+    }
+
+    #[test]
+    fn malformed_edits_are_errors() {
+        let request = crate::test_support::request();
+        assert!(lines_to_request(&[], &request).is_err());
+        assert!(lines_to_request(&["GET / HTTP/9".into()], &request).is_err());
+        assert!(
+            lines_to_request(&["GET / HTTP/1.1".into(), "broken header".into()], &request).is_err()
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn arbitrary_bodies_survive_an_unedited_round_trip(body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096)) {
+            let mut request = crate::test_support::request();
+            request.body = Bytes::from(body);
+            let rebuilt = lines_to_request(&request_to_lines(&request), &request).unwrap();
+            proptest::prop_assert_eq!(rebuilt.body, request.body);
+        }
+    }
+
     fn grpc_request(uri: &str, body: Bytes) -> RequestData {
         RequestData {
             id: RequestId(1),
@@ -209,7 +341,7 @@ mod tests {
         );
 
         // Re-encoding the (unedited) text reproduces the exact wire bytes.
-        let rebuilt = lines_to_request(&lines, &req);
+        let rebuilt = lines_to_request(&lines, &req).unwrap();
         assert_eq!(rebuilt.body, req.body);
     }
 
@@ -243,7 +375,7 @@ mod tests {
         );
 
         // And the two-frame body round-trips byte-for-byte.
-        let rebuilt = lines_to_request(&lines, &req);
+        let rebuilt = lines_to_request(&lines, &req).unwrap();
         assert_eq!(rebuilt.body, req.body);
     }
 }

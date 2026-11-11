@@ -1,213 +1,213 @@
 use std::time::Instant;
 
+use anyhow::Context;
 use bytes::Bytes;
-use http_body_util::BodyExt;
-use hyper::client::conn::http1::Builder as ClientBuilder;
+use http_body_util::{BodyExt, Full};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
-use tracing::debug;
 
-use crate::channel::ProxyToUi;
 use crate::http::models::{HttpVersion, RequestData, ResponseData};
-use crate::proxy::TimingContext;
+use crate::proxy::{ProxyLimits, TimingContext, io_timeout};
 
-pub async fn send_request(request: RequestData, ui_tx: mpsc::Sender<ProxyToUi>) {
-    match send_raw_request(request).await {
-        Ok(resp) => {
-            let _ = ui_tx.try_send(ProxyToUi::RepeaterResponse(resp));
-        }
-        Err(e) => {
-            let _ = ui_tx.try_send(ProxyToUi::RepeaterError(e));
-        }
+/// A cancelled replay must not leave an upstream driver running indefinitely.
+struct ConnectionDriver(tokio::task::JoinHandle<()>);
+
+impl Drop for ConnectionDriver {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
-pub async fn send_raw_request(request: RequestData) -> Result<ResponseData, String> {
-    let result = if request.is_grpc {
-        send_h2(&request).await
-    } else if request.is_tls {
-        send_https(&request).await
+pub async fn send_raw_request(
+    request: RequestData,
+    limits: ProxyLimits,
+) -> anyhow::Result<ResponseData> {
+    anyhow::ensure!(
+        request.body.len() <= limits.max_body_bytes,
+        "Request body exceeds configured limit"
+    );
+    let fallback = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map_or(request.host.as_str(), |(_, value)| value.as_str());
+    let target = crate::proxy::resolve_upstream_target(
+        &request.uri,
+        fallback,
+        if request.is_tls { 443 } else { 80 },
+    )?;
+    let mut request = request;
+    request.is_tls = target.uses_tls(request.is_tls);
+    let mut timing = TimingContext::new();
+    let tcp = crate::proxy::connect_tcp(&target.host, target.port)
+        .await
+        .context("connecting replay upstream")?;
+    timing.tcp_connected = Some(Instant::now());
+    let h2 = request.is_grpc || request.version == HttpVersion::Http2;
+    if request.is_tls {
+        let config = if h2 {
+            crate::tls::build_tls_h2_client_config()
+        } else {
+            crate::tls::build_tls_client_config()
+        };
+        let connector = TlsConnector::from(config);
+        let stream =
+            io_timeout(connector.connect(crate::tls::server_name_or_localhost(&target.host), tcp))
+                .await
+                .context("replay TLS handshake")?;
+        timing.tls_done = Some(Instant::now());
+        send_via(stream, &request, &target, timing, limits, h2).await
     } else {
-        send_http(&request).await
-    };
-    result.map_err(|e| e.to_string())
+        send_via(tcp, &request, &target, timing, limits, h2).await
+    }
 }
 
-async fn send_http(request: &RequestData) -> anyhow::Result<ResponseData> {
-    let target = crate::proxy::resolve_upstream_target(&request.uri, &request.host, 80)?;
-
-    let mut timing = TimingContext::new();
-    let tcp = crate::proxy::connect_tcp(&target.host, target.port).await?;
-    timing.tcp_connected = Some(Instant::now());
-    send_h1_via(TokioIo::new(tcp), request, &target.path_and_query, timing).await
-}
-
-async fn send_https(request: &RequestData) -> anyhow::Result<ResponseData> {
-    let target = crate::proxy::resolve_upstream_target(&request.uri, &request.host, 443)?;
-
-    let mut timing = TimingContext::new();
-    let tcp = crate::proxy::connect_tcp(&target.host, target.port).await?;
-    timing.tcp_connected = Some(Instant::now());
-    let server_name = crate::tls::server_name_or_localhost(&target.host);
-    let connector = TlsConnector::from(crate::tls::build_tls_client_config());
-    let tls_stream = connector.connect(server_name, tcp).await?;
-    timing.tls_done = Some(Instant::now());
-    send_h1_via(
-        TokioIo::new(tls_stream),
-        request,
-        &target.path_and_query,
-        timing,
-    )
-    .await
-}
-
-async fn send_h1_via<IO>(
-    io: TokioIo<IO>,
+async fn send_via<IO>(
+    io: IO,
     request: &RequestData,
-    path: &str,
+    target: &crate::proxy::UpstreamTarget,
     mut timing: TimingContext,
+    limits: ProxyLimits,
+    h2: bool,
 ) -> anyhow::Result<ResponseData>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let (mut sender, conn) = ClientBuilder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .handshake(io)
-        .await?;
-
-    timing.http_handshake_done = Some(Instant::now());
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            debug!("Repeater connection ended: {}", e);
-        }
-    });
-
-    let req = crate::proxy::build_forwarding_request(
+    let authority = crate::proxy::format_authority(
+        &target.host,
+        target.port,
+        if request.is_tls { 443 } else { 80 },
+    );
+    let uri = if h2 {
+        format!(
+            "{}://{authority}{}",
+            if request.is_tls { "https" } else { "http" },
+            target.path_and_query
+        )
+    } else {
+        target.path_and_query.clone()
+    };
+    let mut req = crate::proxy::build_forwarding_request(
         &request.method,
-        path,
+        &uri,
         &request.headers,
         request.body.clone(),
-    )?;
-    let resp = sender.send_request(req).await?;
+    )
+    .context("building replay request")?;
+    if !req.headers().contains_key(http::header::HOST) {
+        req.headers_mut()
+            .insert(http::header::HOST, authority.parse()?);
+    }
+    if request.is_grpc {
+        req.headers_mut()
+            .insert(http::header::TE, http::HeaderValue::from_static("trailers"));
+    }
+    let (response, _driver) = if h2 {
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .handshake::<_, Full<Bytes>>(TokioIo::new(io))
+                .await?;
+        timing.http_handshake_done = Some(Instant::now());
+        let driver = ConnectionDriver(tokio::spawn(async move {
+            let _ = connection.await;
+        }));
+        (
+            io_timeout(sender.send_request(req))
+                .await
+                .context("sending HTTP/2 replay")?,
+            driver,
+        )
+    } else {
+        *req.version_mut() = if request.version == HttpVersion::Http10 {
+            hyper::Version::HTTP_10
+        } else {
+            hyper::Version::HTTP_11
+        };
+        let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+            .preserve_header_case(true)
+            .title_case_headers(true)
+            .handshake(TokioIo::new(io))
+            .await?;
+        timing.http_handshake_done = Some(Instant::now());
+        let driver = ConnectionDriver(tokio::spawn(async move {
+            let _ = connection.await;
+        }));
+        (
+            io_timeout(sender.send_request(req))
+                .await
+                .context("sending HTTP/1 replay")?,
+            driver,
+        )
+    };
     timing.first_byte = Some(Instant::now());
-    parse_response(resp, timing).await
-}
-
-async fn send_h2(request: &RequestData) -> anyhow::Result<ResponseData> {
-    let target = crate::proxy::resolve_upstream_target(&request.uri, &request.host, 443)?;
-
-    let mut timing = TimingContext::new();
-    let client_config = crate::tls::build_tls_h2_client_config();
-
-    let tcp = crate::proxy::connect_tcp(&target.host, target.port).await?;
-    timing.tcp_connected = Some(Instant::now());
-    let server_name = crate::tls::server_name_or_localhost(&target.host);
-    let connector = TlsConnector::from(client_config);
-    let tls_stream = connector.connect(server_name, tcp).await?;
-    timing.tls_done = Some(Instant::now());
-
-    let io = TokioIo::new(tls_stream);
-    let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-        .handshake(io)
-        .await?;
-
-    timing.http_handshake_done = Some(Instant::now());
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            debug!("Repeater H2 connection ended: {}", e);
-        }
-    });
-
-    let authority = crate::proxy::format_authority(&target.host, target.port, 443);
-    let upstream_uri = format!("https://{}{}", authority, target.path_and_query);
-
-    let req = crate::proxy::build_forwarding_request(
-        &request.method,
-        &upstream_uri,
-        &request.headers,
-        request.body.clone(),
-    )?;
-    let resp = sender.send_request(req).await?;
-    timing.first_byte = Some(Instant::now());
-
-    parse_h2_response(resp, timing).await
+    parse_response(response, timing, limits).await
 }
 
 async fn parse_response(
-    resp: hyper::Response<hyper::body::Incoming>,
+    response: hyper::Response<hyper::body::Incoming>,
     timing: TimingContext,
+    limits: ProxyLimits,
 ) -> anyhow::Result<ResponseData> {
-    let status = resp.status().as_u16();
-    let version = resp.version().into();
-    let headers = crate::http::models::extract_headers(resp.headers());
-
+    let status = response.status().as_u16();
+    let version = response.version().into();
+    let headers = crate::http::models::extract_headers(response.headers());
     let body_start = Instant::now();
-    let body = http_body_util::Limited::new(
-        resp.into_body(),
-        crate::proxy::ProxyLimits::default().max_body_bytes,
+    let collected = io_timeout(
+        http_body_util::Limited::new(response.into_body(), limits.max_body_bytes).collect(),
     )
-    .collect()
     .await
-    .map_err(|error| anyhow::anyhow!(error.to_string()))?
-    .to_bytes();
+    .context("reading replay response")?;
     let content_transfer = body_start.elapsed();
-    let duration = timing.start.elapsed();
-    let timing_data = timing.finish(Some(content_transfer));
-
+    let trailers = crate::http::models::extract_trailers(collected.trailers());
+    let body = collected.to_bytes();
     Ok(ResponseData {
         status,
-        reason: crate::http::models::status_reason(status).to_string(),
+        reason: crate::http::models::status_reason(status).into(),
         version,
         headers,
         body,
-        trailers: Vec::new(),
-        duration,
-        timing: Some(timing_data),
+        trailers,
+        duration: timing.start.elapsed(),
+        timing: Some(timing.finish(Some(content_transfer))),
     })
 }
 
-async fn parse_h2_response(
-    resp: hyper::Response<hyper::body::Incoming>,
-    timing: TimingContext,
-) -> anyhow::Result<ResponseData> {
-    let status = resp.status().as_u16();
-    let headers = crate::http::models::extract_headers(resp.headers());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::service::service_fn;
+    use std::convert::Infallible;
 
-    let body_start = Instant::now();
-    let collected = http_body_util::Limited::new(
-        resp.into_body(),
-        crate::proxy::ProxyLimits::default().max_body_bytes,
-    )
-    .collect()
-    .await
-    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let content_transfer = body_start.elapsed();
-    let trailers_hm = collected.trailers().cloned();
-    let body = collected.to_bytes();
-    let duration = timing.start.elapsed();
+    #[tokio::test]
+    async fn configured_limits_apply_to_replay_requests_and_responses() {
+        let limits = ProxyLimits {
+            max_body_bytes: 2,
+            ..ProxyLimits::default()
+        };
+        let mut request = crate::test_support::request();
+        request.body = Bytes::from_static(b"big");
+        assert!(
+            send_raw_request(request.clone(), limits)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("configured limit")
+        );
 
-    let trailers = crate::http::models::extract_trailers(trailers_hm.as_ref());
-
-    let resp_body = if body.is_empty() && !trailers.is_empty() {
-        Bytes::new()
-    } else {
-        body
-    };
-
-    let timing_data = timing.finish(Some(content_transfer));
-
-    Ok(ResponseData {
-        status,
-        reason: crate::http::models::status_reason(status).to_string(),
-        version: HttpVersion::Http2,
-        headers,
-        body: resp_body,
-        trailers,
-        duration,
-        timing: Some(timing_data),
-    })
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        request.uri = format!("http://{}/", listener.local_addr().unwrap());
+        request.body = Bytes::new();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|_| async {
+                Ok::<_, Infallible>(hyper::Response::new(Full::new(Bytes::from_static(b"big"))))
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+        let error = send_raw_request(request, limits).await.unwrap_err();
+        assert!(format!("{error:#}").contains("length limit"));
+        server.await.unwrap();
+    }
 }

@@ -37,6 +37,9 @@ impl App {
     }
 
     pub(super) fn handle_save_dialog_key(&mut self, key: KeyEvent) {
+        if self.saving_session {
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.show_save_dialog = false;
@@ -45,14 +48,8 @@ impl App {
             }
             KeyCode::Enter => {
                 let path = std::path::PathBuf::from(self.save_buffer.trim());
-                self.show_save_dialog = false;
-                self.save_buffer.clear();
                 let quit_after = self.save_on_confirm_quit;
-                self.save_on_confirm_quit = false;
-                self.save_session_to(&path);
-                if quit_after {
-                    self.should_quit = true;
-                }
+                self.save_session_to(path, quit_after);
             }
             KeyCode::Char(c) => {
                 self.save_buffer.push(c);
@@ -64,7 +61,7 @@ impl App {
         }
     }
 
-    fn save_session_to(&mut self, path: &std::path::Path) {
+    fn save_session_to(&mut self, path: std::path::PathBuf, quit_after: bool) {
         let macro_requests: Vec<_> = self
             .macros
             .steps
@@ -73,16 +70,22 @@ impl App {
             .collect();
         let session =
             crate::http::session::Session::new(self.store.entries().to_vec(), macro_requests);
-        let result = crate::fs_security::write_private_with(path, |file| {
-            use std::io::Write;
-            let mut writer = std::io::BufWriter::new(file);
-            serde_json::to_writer_pretty(&mut writer, &session).map_err(std::io::Error::other)?;
-            writer.flush()
+        self.saving_session = true;
+        let ui_tx = self.ui_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                crate::http::session::save_to(&session, &path)?;
+                Ok::<_, anyhow::Error>(path)
+            })
+            .await;
+            let result = match result {
+                Ok(result) => result.map_err(|error| format!("{error:#}")),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = ui_tx
+                .send(crate::channel::ProxyToUi::SessionSaved(result, quit_after))
+                .await;
         });
-        match result {
-            Ok(()) => self.set_status(format!("Saved to {}", path.display())),
-            Err(e) => self.set_status(format!("Save failed: {}", e)),
-        }
     }
 
     pub(super) fn export_rules(&mut self) {
@@ -109,13 +112,36 @@ impl App {
     pub fn load_session(&mut self, path: &std::path::Path) {
         match crate::http::import::load_file(path) {
             Ok(session) => {
-                self.store.load_entries(session.entries);
-                if let Some(saved) = session.macros {
-                    self.macros.steps = saved.steps.into_iter().map(SequenceStep::new).collect();
-                    self.macros.selected = 0;
-                    self.macros.running = false;
-                    self.macros.current_step = 0;
+                if session.macros.as_ref().is_some_and(|saved| {
+                    saved
+                        .steps
+                        .iter()
+                        .any(|request| request.body.len() > self.proxy_limits.max_body_bytes)
+                }) {
+                    self.set_status("Load failed: macro request body exceeds configured limit");
+                    return;
                 }
+                if let Err(error) = self.store.load_entries(session.entries) {
+                    self.set_status(format!("Load failed: {error}"));
+                    return;
+                }
+                self.macros.steps = session
+                    .macros
+                    .map(|saved| {
+                        saved
+                            .steps
+                            .into_iter()
+                            .map(|mut request| {
+                                request.id = crate::http::models::RequestId::next();
+                                SequenceStep::new(request)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.macros.selected = 0;
+                self.macros.running = false;
+                self.macros.run_id = None;
+                self.macros.current_step = 0;
                 let macro_count = self.macros.steps.len();
                 let msg = if macro_count > 0 {
                     format!(
@@ -210,5 +236,48 @@ impl App {
                 self.set_status(format!("Export failed: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_save_keeps_dialog_and_does_not_quit() {
+        let (mut app, mut receiver) = crate::test_support::app();
+        let directory = tempfile::tempdir().unwrap();
+        app.show_save_dialog = true;
+        app.save_on_confirm_quit = true;
+        app.save_buffer = directory.path().display().to_string();
+        let original_path = app.save_buffer.clone();
+        app.handle_save_dialog_key(KeyEvent::new(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        app.handle_proxy_message(receiver.recv().await.unwrap());
+        assert!(!app.should_quit);
+        assert!(app.show_save_dialog);
+        assert_eq!(app.save_buffer, original_path);
+        assert!(!app.saving_session);
+    }
+
+    #[tokio::test]
+    async fn successful_save_can_quit_and_is_loadable() {
+        let (mut app, mut receiver) = crate::test_support::app();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.json");
+        app.store.insert(crate::test_support::request());
+        app.show_save_dialog = true;
+        app.save_on_confirm_quit = true;
+        app.save_buffer = path.display().to_string();
+        app.handle_save_dialog_key(KeyEvent::new(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        app.handle_proxy_message(receiver.recv().await.unwrap());
+        assert!(app.should_quit);
+        assert!(!app.show_save_dialog);
+        assert_eq!(crate::http::session::load(&path).unwrap().entries.len(), 1);
     }
 }

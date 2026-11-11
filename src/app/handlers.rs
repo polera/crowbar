@@ -213,6 +213,10 @@ impl App {
                 if entry_count > 0
                     && let Some(entry) = self.store.filtered_entry(self.history.selected)
                 {
+                    if entry.request_body_truncated {
+                        self.set_status("Cannot add a truncated request capture to a macro");
+                        return;
+                    }
                     self.macros
                         .steps
                         .push(SequenceStep::new(entry.request.clone()));
@@ -257,8 +261,12 @@ impl App {
             }
             KeyCode::Char('R') if count > 0 => {
                 let mut rules = self.rules.write();
-                rules[self.rules_ui.selected].is_regex = !rules[self.rules_ui.selected].is_regex;
-                rules[self.rules_ui.selected].invalidate_regex();
+                let rule = &mut rules[self.rules_ui.selected];
+                let result = rule.set_regex(!rule.is_regex());
+                drop(rules);
+                if let Err(error) = result {
+                    self.set_status(format!("Invalid regex: {error}"));
+                }
             }
             KeyCode::Char('n') if count > 0 => {
                 self.rules_ui.edit_buffer = {
@@ -270,7 +278,7 @@ impl App {
             KeyCode::Char('p') if count > 0 => {
                 self.rules_ui.edit_buffer = {
                     let rules = self.rules.read();
-                    rules[self.rules_ui.selected].match_pattern.clone()
+                    rules[self.rules_ui.selected].pattern().to_string()
                 };
                 self.rules_ui.editing_field = Some(RuleField::Pattern);
             }
@@ -355,9 +363,13 @@ impl App {
                                     self.rules_ui.edit_buffer.clone();
                             }
                             RuleField::Pattern => {
-                                rules[self.rules_ui.selected].match_pattern =
-                                    self.rules_ui.edit_buffer.clone();
-                                rules[self.rules_ui.selected].invalidate_regex();
+                                let result = rules[self.rules_ui.selected]
+                                    .set_pattern(self.rules_ui.edit_buffer.clone());
+                                if let Err(error) = result {
+                                    drop(rules);
+                                    self.set_status(format!("Invalid regex: {error}"));
+                                    return;
+                                }
                             }
                             RuleField::Replacement => {
                                 rules[self.rules_ui.selected].replacement =

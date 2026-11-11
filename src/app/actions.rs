@@ -7,7 +7,7 @@ use crate::proxy::intercept::InterceptDecision;
 use crate::proxy::repeater;
 use crate::tui::tabs::Tab;
 
-use super::App;
+use super::{App, RequestState};
 
 impl App {
     pub(super) fn set_status(&mut self, msg: impl Into<String>) {
@@ -15,10 +15,17 @@ impl App {
     }
 
     pub(super) fn forward_edited_intercept(&mut self) {
-        if let Some(original) = self.intercept_ui.queue.pop_front() {
-            let edited = codec::lines_to_request(&self.intercept_ui.editor.lines, &original);
+        if let Some(original) = self.intercept_ui.queue.front() {
+            let edited = match codec::lines_to_request(&self.intercept_ui.editor.lines, original) {
+                Ok(edited) => edited,
+                Err(error) => {
+                    self.set_status(error.to_string());
+                    return;
+                }
+            };
             self.intercept_state
                 .resolve(original.id, InterceptDecision::ForwardEdited(edited));
+            self.intercept_ui.queue.pop_front();
         }
         self.intercept_ui.editing = false;
         self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
@@ -28,12 +35,14 @@ impl App {
     pub(super) fn send_to_repeater(&mut self) {
         self.store.refresh_filter_cache(&self.history.filter);
         if let Some(entry) = self.store.filtered_entry(self.history.selected) {
+            if entry.request_body_truncated {
+                self.set_status("Cannot replay a truncated request capture");
+                return;
+            }
             let req = &entry.request;
             self.repeater.editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
             self.repeater.original = Some(req.clone());
-            self.repeater.response = None;
-            self.repeater.error = None;
-            self.repeater.pending = false;
+            self.repeater.operation = RequestState::Idle;
             self.repeater.editing = false;
             self.repeater.req_scroll = 0;
             self.repeater.resp_scroll = 0;
@@ -46,9 +55,7 @@ impl App {
             let req = &step.request;
             self.repeater.editor = TextEditor::new(codec::request_to_lines(req), self.editor_mode);
             self.repeater.original = Some(req.clone());
-            self.repeater.response = None;
-            self.repeater.error = None;
-            self.repeater.pending = false;
+            self.repeater.operation = RequestState::Idle;
             self.repeater.editing = false;
             self.repeater.req_scroll = 0;
             self.repeater.resp_scroll = 0;
@@ -60,7 +67,7 @@ impl App {
     }
 
     pub(super) fn repeater_send(&mut self) {
-        if self.repeater.editor.lines.is_empty() || self.repeater.pending {
+        if self.repeater.editor.lines.is_empty() || self.repeater.operation.is_pending() {
             return;
         }
 
@@ -77,16 +84,26 @@ impl App {
             timestamp: std::time::SystemTime::now(),
         });
 
-        let request = codec::lines_to_request(&self.repeater.editor.lines, &original);
-        self.repeater.original = Some(request.clone());
-        self.repeater.pending = true;
-        self.repeater.response = None;
-        self.repeater.error = None;
+        let request = match codec::lines_to_request(&self.repeater.editor.lines, &original) {
+            Ok(request) => request,
+            Err(error) => {
+                self.set_status(error.to_string());
+                return;
+            }
+        };
+        let operation_id = RequestId::next();
+        self.repeater.operation = RequestState::Sending(operation_id);
         self.repeater.resp_scroll = 0;
 
         let ui_tx = self.ui_tx.clone();
+        let limits = self.proxy_limits;
         tokio::spawn(async move {
-            repeater::send_request(request, ui_tx).await;
+            let result = repeater::send_raw_request(request, limits)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = ui_tx
+                .send(ProxyToUi::RepeaterFinished(operation_id, result))
+                .await;
         });
     }
 
@@ -102,6 +119,7 @@ impl App {
         }
 
         self.macros.running = true;
+        self.macros.run_id = Some(RequestId::next());
         self.macros.current_step = 0;
         self.macro_send_next();
     }
@@ -109,6 +127,7 @@ impl App {
     fn macro_send_next(&mut self) {
         if self.macros.current_step >= self.macros.steps.len() {
             self.macros.running = false;
+            self.macros.run_id = None;
             self.set_status(format!(
                 "Macro complete ({} steps)",
                 self.macros.steps.len()
@@ -120,16 +139,18 @@ impl App {
         let request = self.macros.steps[self.macros.current_step].request.clone();
         let step_idx = self.macros.current_step;
         let ui_tx = self.ui_tx.clone();
+        let Some(run_id) = self.macros.run_id else {
+            return;
+        };
+        let limits = self.proxy_limits;
 
         tokio::spawn(async move {
-            match repeater::send_raw_request(request).await {
-                Ok(resp) => {
-                    let _ = ui_tx.try_send(ProxyToUi::MacroResponse(step_idx, resp));
-                }
-                Err(e) => {
-                    let _ = ui_tx.try_send(ProxyToUi::MacroError(step_idx, e));
-                }
-            }
+            let result = repeater::send_raw_request(request, limits)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = ui_tx
+                .send(ProxyToUi::MacroFinished(run_id, step_idx, result))
+                .await;
         });
     }
 
@@ -138,7 +159,7 @@ impl App {
             .unwrap_or_default()
             .join(".crowbar")
             .join("exports");
-        if std::fs::create_dir_all(&dir).is_err() {
+        if crate::fs_security::ensure_private_dir(&dir).is_err() {
             self.set_status("Failed to create exports directory");
             return;
         }
@@ -147,7 +168,7 @@ impl App {
             .unwrap_or_default()
             .as_secs();
         let path = dir.join(format!("{}-{}.{}", prefix, ts, ext));
-        match std::fs::write(&path, content) {
+        match crate::fs_security::write_private(&path, content) {
             Ok(_) => {
                 self.set_status(format!("Exported to {}", path.display()));
             }
@@ -159,6 +180,19 @@ impl App {
 
     pub fn handle_proxy_message(&mut self, msg: ProxyToUi) {
         match msg {
+            ProxyToUi::SessionSaved(result, quit_after) => {
+                self.saving_session = false;
+                match result {
+                    Ok(path) => {
+                        self.show_save_dialog = false;
+                        self.save_buffer.clear();
+                        self.save_on_confirm_quit = false;
+                        self.should_quit = quit_after;
+                        self.set_status(format!("Saved to {}", path.display()));
+                    }
+                    Err(error) => self.set_status(format!("Save failed: {error}")),
+                }
+            }
             ProxyToUi::RequestCaptured(req) => {
                 self.store.insert(req);
                 if !self.history.detail_open && self.store.len() > 1 {
@@ -180,16 +214,18 @@ impl App {
                 self.store.mark_error(id, err);
             }
             ProxyToUi::InterceptedRequest(req) => {
-                self.intercept_ui.queue.push_back(req);
+                if self.intercept_state.is_pending(req.id) {
+                    self.intercept_ui.queue.push_back(req);
+                }
             }
-            ProxyToUi::RepeaterResponse(resp) => {
-                self.repeater.pending = false;
-                self.repeater.response = Some(resp);
-                self.repeater.error = None;
-            }
-            ProxyToUi::RepeaterError(err) => {
-                self.repeater.pending = false;
-                self.repeater.error = Some(err);
+            ProxyToUi::RepeaterFinished(id, result) => {
+                if matches!(self.repeater.operation, RequestState::Sending(current) if current == id)
+                {
+                    self.repeater.operation = match result {
+                        Ok(response) => RequestState::Complete(response),
+                        Err(error) => RequestState::Failed(error),
+                    };
+                }
             }
             ProxyToUi::WebSocketFrame(id, msg) => {
                 self.store.push_ws_message(id, msg);
@@ -200,22 +236,55 @@ impl App {
             ProxyToUi::GrpcTrailers(id, trailers) => {
                 self.store.update_trailers(id, trailers);
             }
-            ProxyToUi::MacroResponse(step_idx, resp) => {
-                if step_idx < self.macros.steps.len() {
-                    self.macros.steps[step_idx].response = Some(resp);
-                    self.macros.steps[step_idx].state = StepState::Complete;
-                    self.macros.current_step = step_idx + 1;
-                    self.macro_send_next();
+            ProxyToUi::RequestCaptureTruncated(id) => self.store.mark_request_capture_truncated(id),
+            ProxyToUi::MacroFinished(run_id, step_idx, result) => {
+                if self.macros.run_id != Some(run_id)
+                    || !self.macros.running
+                    || step_idx != self.macros.current_step
+                {
+                    return;
                 }
-            }
-            ProxyToUi::MacroError(step_idx, err) => {
-                if step_idx < self.macros.steps.len() {
-                    self.macros.steps[step_idx].error = Some(err);
-                    self.macros.steps[step_idx].state = StepState::Error;
-                    self.macros.running = false;
-                    self.set_status(format!("Macro stopped at step {} (error)", step_idx + 1));
+                if let Some(step) = self.macros.steps.get_mut(step_idx) {
+                    match result {
+                        Ok(response) => {
+                            step.response = Some(response);
+                            step.state = StepState::Complete;
+                            self.macros.current_step += 1;
+                            self.macro_send_next();
+                        }
+                        Err(error) => {
+                            step.error = Some(error);
+                            step.state = StepState::Error;
+                            self.macros.running = false;
+                            self.macros.run_id = None;
+                            self.set_status(format!(
+                                "Macro stopped at step {} (error)",
+                                step_idx + 1
+                            ));
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_repeater_completion_cannot_replace_current_operation() {
+        let (mut app, _receiver) = crate::test_support::app();
+        let old = RequestId::next();
+        let current = RequestId::next();
+        app.repeater.operation = RequestState::Sending(current);
+        app.handle_proxy_message(ProxyToUi::RepeaterFinished(
+            old,
+            Ok(crate::test_support::response()),
+        ));
+        assert!(matches!(app.repeater.operation, RequestState::Sending(id) if id == current));
+        app.handle_proxy_message(ProxyToUi::RepeaterFinished(current, Err("failed".into())));
+        assert_eq!(app.repeater.operation.error(), Some("failed"));
     }
 }

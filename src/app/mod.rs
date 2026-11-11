@@ -13,7 +13,7 @@ mod render;
 
 use crate::channel::ProxyToUi;
 use crate::editor::{EditorMode, TextEditor};
-use crate::http::models::{RequestData, ResponseData};
+use crate::http::models::{RequestData, RequestId, ResponseData};
 use crate::http::sequence::SequenceStep;
 use crate::http::store::InMemoryStore;
 use crate::proxy::intercept::InterceptState;
@@ -38,9 +38,7 @@ pub struct InterceptUiState {
 
 pub struct RepeaterState {
     pub original: Option<RequestData>,
-    pub response: Option<ResponseData>,
-    pub error: Option<String>,
-    pub pending: bool,
+    pub operation: RequestState,
     pub editing: bool,
     pub editor: TextEditor,
     pub req_scroll: u16,
@@ -48,10 +46,40 @@ pub struct RepeaterState {
     pub show_diff: bool,
 }
 
+#[derive(Default)]
+pub enum RequestState {
+    #[default]
+    Idle,
+    Sending(RequestId),
+    Complete(ResponseData),
+    Failed(String),
+}
+
+impl RequestState {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Sending(_))
+    }
+    pub fn response(&self) -> Option<&ResponseData> {
+        if let Self::Complete(response) = self {
+            Some(response)
+        } else {
+            None
+        }
+    }
+    pub fn error(&self) -> Option<&str> {
+        if let Self::Failed(error) = self {
+            Some(error)
+        } else {
+            None
+        }
+    }
+}
+
 pub struct MacroState {
     pub steps: Vec<SequenceStep>,
     pub selected: usize,
     pub running: bool,
+    pub run_id: Option<RequestId>,
     pub show: bool,
     pub current_step: usize,
 }
@@ -115,6 +143,7 @@ pub struct App {
     pub show_save_dialog: bool,
     pub save_buffer: String,
     pub save_on_confirm_quit: bool,
+    pub saving_session: bool,
 
     // Quit confirmation
     pub show_quit_confirm: bool,
@@ -190,7 +219,7 @@ impl App {
         Self {
             active_tab: Tab::History,
             should_quit: false,
-            store: InMemoryStore::new(max_history_entries),
+            store: InMemoryStore::new(max_history_entries, proxy_limits.max_body_bytes),
             bind_addr,
             intercept_state,
             scope,
@@ -210,9 +239,7 @@ impl App {
             },
             repeater: RepeaterState {
                 original: None,
-                response: None,
-                error: None,
-                pending: false,
+                operation: RequestState::Idle,
                 editing: false,
                 editor: TextEditor::new(vec![], editor_mode),
                 req_scroll: 0,
@@ -223,6 +250,7 @@ impl App {
                 steps: Vec::new(),
                 selected: 0,
                 running: false,
+                run_id: None,
                 show: false,
                 current_step: 0,
             },
@@ -258,6 +286,7 @@ impl App {
             show_save_dialog: false,
             save_buffer: String::new(),
             save_on_confirm_quit: false,
+            saving_session: false,
             show_quit_confirm: false,
         }
     }

@@ -24,10 +24,6 @@ impl ProxyHandler {
         Self { ctx }
     }
 
-    pub fn limits(&self) -> crate::proxy::ProxyLimits {
-        self.ctx.limits
-    }
-
     pub async fn handle(
         &self,
         req: Request<Incoming>,
@@ -44,12 +40,15 @@ impl ProxyHandler {
         &self,
         req: Request<Incoming>,
     ) -> Result<Response<Full<Bytes>>, hyper::Error> {
-        let host = req.uri().host().unwrap_or("unknown").to_string();
+        let Some(host) = req.uri().host() else {
+            return Ok(crate::proxy::bad_gateway("CONNECT requires an authority"));
+        };
+        let host = host.trim_matches(['[', ']']).to_string();
         let port = req.uri().port_u16().unwrap_or(443);
 
         let ctx = self.ctx.clone();
 
-        tokio::spawn(async move {
+        self.ctx.spawn(async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
                     tunnel::handle_tunnel(upgraded, host, port, ctx).await;
@@ -92,13 +91,17 @@ impl ProxyHandler {
             return self.handle_plain_ws_upgrade(req, &host).await;
         }
 
-        let (parts, body) = req.into_parts();
-        let body_bytes = match http_body_util::Limited::new(body, self.ctx.limits.max_body_bytes)
-            .collect()
-            .await
+        let (_, body) = req.into_parts();
+        let body_bytes = match crate::proxy::io_timeout(
+            http_body_util::Limited::new(body, self.ctx.limits.max_body_bytes).collect(),
+        )
+        .await
         {
             Ok(body) => body.to_bytes(),
-            Err(_) => return Ok(crate::proxy::payload_too_large()),
+            Err(error) if error.root_cause().is::<http_body_util::LengthLimitError>() => {
+                return Ok(crate::proxy::payload_too_large());
+            }
+            Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
         };
 
         let in_scope = self.ctx.scope.is_in_scope(&host);
@@ -120,15 +123,24 @@ impl ProxyHandler {
             let _ = self
                 .ctx
                 .ui_tx
-                .try_send(ProxyToUi::RequestCaptured(request_data.clone()));
+                .send(ProxyToUi::RequestCaptured(request_data.clone()))
+                .await;
         }
 
-        if in_scope
-            && let Some(rx) = self
+        let decision = if in_scope {
+            match self
                 .ctx
                 .intercept
                 .intercept_request(&request_data, &self.ctx.ui_tx)
-        {
+                .await
+            {
+                Ok(decision) => decision,
+                Err(error) => return Ok(crate::proxy::service_unavailable(&error.to_string())),
+            }
+        } else {
+            None
+        };
+        if let Some(rx) = decision {
             match rx.await {
                 Ok(InterceptDecision::Drop) => {
                     return Ok(Response::builder()
@@ -140,7 +152,11 @@ impl ProxyHandler {
                     request_data = edited;
                 }
                 Ok(InterceptDecision::Forward) => {}
-                Err(_) => {}
+                Err(_) => {
+                    return Ok(crate::proxy::service_unavailable(
+                        "Interceptor disconnected",
+                    ));
+                }
             }
         }
 
@@ -175,10 +191,9 @@ impl ProxyHandler {
                     "Failed to connect to upstream {}:{}: {}",
                     target.host, target.port, e
                 );
-                let _ = self.ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                    request_id,
-                    format!("Connection failed: {}", e),
-                ));
+                self.ctx
+                    .report_error(request_id, format!("Connection failed: {e}"))
+                    .await;
                 return Ok(crate::proxy::bad_gateway(&format!(
                     "Failed to connect to upstream: {}",
                     e
@@ -186,10 +201,32 @@ impl ProxyHandler {
             }
         };
 
+        if target.uses_tls(request_data.is_tls) {
+            let connector = tokio_rustls::TlsConnector::from(self.ctx.tls_client_config.clone());
+            let stream = match crate::proxy::io_timeout(
+                connector.connect(crate::tls::server_name_or_localhost(&target.host), upstream),
+            )
+            .await
+            {
+                Ok(stream) => stream,
+                Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
+            };
+            timing.tls_done = Some(Instant::now());
+            return Ok(crate::proxy::forward_h1(
+                TokioIo::new(stream),
+                request_data.version.into(),
+                &target.path_and_query,
+                &request_data,
+                timing,
+                in_scope,
+                &self.ctx,
+            )
+            .await);
+        }
         let io = TokioIo::new(upstream);
         Ok(crate::proxy::forward_h1(
             io,
-            parts.version,
+            request_data.version.into(),
             &target.path_and_query,
             &request_data,
             timing,
@@ -210,11 +247,20 @@ impl ProxyHandler {
         let headers = crate::http::models::extract_headers(req.headers());
 
         let uri = req.uri().clone();
-        let port = uri.port_u16().unwrap_or(80);
+        let fallback_authority = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .map_or(host, |(_, value)| value.as_str());
+        let target =
+            match crate::proxy::resolve_upstream_target(&uri.to_string(), fallback_authority, 80) {
+                Ok(target) => target,
+                Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
+            };
+        let port = target.port;
 
         let full_uri = format!(
             "ws://{}{}",
-            host,
+            crate::proxy::format_authority(&target.host, port, 80),
             uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
         );
 
@@ -235,10 +281,11 @@ impl ProxyHandler {
             let _ = self
                 .ctx
                 .ui_tx
-                .try_send(ProxyToUi::RequestCaptured(request_data));
+                .send(ProxyToUi::RequestCaptured(request_data))
+                .await;
         }
 
-        let upstream_host = uri.host().unwrap_or(host);
+        let upstream_host = &target.host;
         let tcp = match crate::proxy::connect_tcp(upstream_host, port).await {
             Ok(s) => s,
             Err(e) => {
@@ -246,10 +293,9 @@ impl ProxyHandler {
                     "WebSocket: failed to connect to upstream {}:{}: {}",
                     upstream_host, port, e
                 );
-                let _ = self.ctx.ui_tx.try_send(ProxyToUi::RequestError(
-                    request_id,
-                    format!("Connection failed: {}", e),
-                ));
+                self.ctx
+                    .report_error(request_id, format!("Connection failed: {e}"))
+                    .await;
                 return Ok(crate::proxy::bad_gateway(&format!(
                     "Connection failed: {}",
                     e
@@ -274,8 +320,8 @@ impl ProxyHandler {
             }
         };
 
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
+        self.ctx.spawn(async move {
+            if let Err(e) = conn.with_upgrades().await {
                 tracing::debug!("WebSocket upstream connection ended: {}", e);
             }
         });
@@ -292,16 +338,22 @@ impl ProxyHandler {
             .version(req.version());
 
         for (key, value) in crate::proxy::end_to_end_headers(&headers, true) {
-            upstream_req = upstream_req.header(key.as_str(), value.as_str());
+            let value = match crate::http::models::header_value(value) {
+                Ok(value) => value,
+                Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
+            };
+            upstream_req = upstream_req.header(key.as_str(), value);
         }
 
         let client_req_for_upgrade = req;
 
-        let upstream_req = upstream_req
-            .body(Full::new(Bytes::new()))
-            .expect("building websocket upgrade request");
+        let upstream_req = match upstream_req.body(Full::new(Bytes::new())) {
+            Ok(request) => request,
+            Err(error) => return Ok(crate::proxy::bad_gateway(&error.to_string())),
+        };
 
-        let upstream_resp = match sender.send_request(upstream_req).await {
+        let upstream_resp = match crate::proxy::io_timeout(sender.send_request(upstream_req)).await
+        {
             Ok(resp) => resp,
             Err(e) => {
                 warn!("WebSocket: upstream request failed: {}", e);
@@ -312,19 +364,15 @@ impl ProxyHandler {
         let resp_status = upstream_resp.status().as_u16();
 
         if resp_status != 101 {
-            let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
-            let resp_body = upstream_resp.into_body();
-            let resp_body = http_body_util::Limited::new(resp_body, self.ctx.limits.max_body_bytes)
-                .collect()
-                .await
-                .map(|b| b.to_bytes())
-                .unwrap_or_default();
-
-            let mut response = hyper::Response::builder().status(resp_status);
-            for (key, value) in &resp_headers {
-                response = response.header(key.as_str(), value.as_str());
-            }
-            return Ok(response.body(Full::new(resp_body)).unwrap());
+            return Ok(crate::proxy::process_h1_response(
+                upstream_resp,
+                request_id,
+                "GET",
+                TimingContext::new(),
+                in_scope,
+                &self.ctx,
+            )
+            .await);
         }
 
         let resp_headers = crate::http::models::extract_headers(upstream_resp.headers());
@@ -343,14 +391,15 @@ impl ProxyHandler {
             let _ = self
                 .ctx
                 .ui_tx
-                .try_send(ProxyToUi::ResponseReceived(request_id, response_data));
+                .send(ProxyToUi::ResponseReceived(request_id, response_data))
+                .await;
         }
 
         let ui_tx_clone = self.ctx.ui_tx.clone();
         let host_owned = host.to_string();
         let max_ws_frame_bytes = self.ctx.limits.max_ws_frame_bytes;
 
-        tokio::spawn(async move {
+        self.ctx.spawn(async move {
             let upstream_upgraded = match hyper::upgrade::on(upstream_resp).await {
                 Ok(u) => u,
                 Err(e) => {
@@ -384,11 +433,9 @@ impl ProxyHandler {
             .await;
         });
 
-        let mut response = hyper::Response::builder().status(101);
-        for (key, value) in &resp_headers {
-            response = response.header(key.as_str(), value.as_str());
-        }
-
-        Ok(response.body(Full::new(Bytes::new())).unwrap())
+        Ok(
+            crate::proxy::build_response(101, &resp_headers, Full::new(Bytes::new()), true)
+                .unwrap_or_else(|error| crate::proxy::bad_gateway(&error.to_string())),
+        )
     }
 }

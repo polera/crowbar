@@ -52,7 +52,7 @@ A terminal-based web security testing proxy built in Rust. Intercept, inspect, a
 
 ## Installation
 
-Requires a Rust toolchain (1.85+, edition 2024).
+Requires a Rust toolchain (1.88+, edition 2024).
 
 ```sh
 cargo build --release
@@ -126,6 +126,22 @@ The default resource limits are 10 MiB per buffered HTTP body, 16 MiB per
 WebSocket frame, 10,000 retained history entries, and 128 concurrent client
 connections. Lower these values for an untrusted or memory-constrained
 environment. The resource-limit settings are currently CLI-only.
+
+These limits also apply to Repeater/macro bodies and loaded history. Session,
+HAR, and rules input files are limited to 256 MiB before deserialization. Retained
+stream messages have both count and byte limits. A truncated gRPC request capture
+cannot be replayed or added to a macro. gRPC request and response bodies are
+forwarded as streams; interception and body-rewrite rules remain disabled for
+gRPC traffic.
+
+Network operations have a 30-second deadline (including gRPC stream inactivity),
+and WebSocket relays close after 120 seconds without reads. Interception waits
+for the UI instead of forwarding requests when the UI queue is full.
+
+The request editor preserves original body bytes when only the method, URL, or
+headers are changed. Binary and compressed gRPC bodies use an explicit
+`[crowbar:base64]` body representation; malformed edits are rejected rather than
+sent as placeholder text.
 
 ### CA Certificate
 

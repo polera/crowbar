@@ -5,7 +5,14 @@ use serde_json::json;
 
 use super::models::HistoryEntry;
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 pub fn to_curl(entry: &HistoryEntry) -> String {
+    if entry.request_body_truncated {
+        return "# Cannot replay a truncated request capture\n".into();
+    }
     let req = &entry.request;
     let mut parts = Vec::new();
 
@@ -16,23 +23,32 @@ pub fn to_curl(entry: &HistoryEntry) -> String {
         format!("{}://{}{}", scheme, req.host, req.uri)
     };
 
-    parts.push(format!("curl -X {} '{}'", req.method, url));
+    parts.push(format!(
+        "curl -X {} --url {}",
+        shell_quote(&req.method),
+        shell_quote(&url)
+    ));
 
     for (key, value) in &req.headers {
         if key.eq_ignore_ascii_case("host") || key.eq_ignore_ascii_case("content-length") {
             continue;
         }
-        parts.push(format!("  -H '{}: {}'", key, value.replace('\'', "'\\''")));
+        parts.push(format!("  -H {}", shell_quote(&format!("{key}: {value}"))));
     }
 
     if !req.body.is_empty() {
         match std::str::from_utf8(&req.body) {
-            Ok(text) => {
-                parts.push(format!("  -d '{}'", text.replace('\'', "'\\''")));
+            Ok(text) if !text.contains('\0') && !text.starts_with('@') => {
+                parts.push(format!("  --data-binary {}", shell_quote(text)));
             }
-            Err(_) => {
+            _ => {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&req.body);
-                parts.push(format!("  --data-binary @<(echo '{}' | base64 -d)", b64));
+                parts.push("  --data-binary @-".into());
+                return format!(
+                    "printf '%s' {} | base64 -d | {}",
+                    shell_quote(&b64),
+                    parts.join(" \\\n")
+                );
             }
         }
     }
@@ -117,11 +133,7 @@ fn har_entry(entry: &HistoryEntry) -> serde_json::Value {
         format!("{}://{}{}", scheme, req.host, req.uri)
     };
 
-    let timestamp = req
-        .timestamp
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let started = chrono_lite_iso(timestamp.as_secs()).to_string();
+    let started = format_iso_timestamp(req.timestamp);
 
     let req_headers: Vec<serde_json::Value> = req
         .headers
@@ -175,6 +187,9 @@ fn har_entry(entry: &HistoryEntry) -> serde_json::Value {
     });
     if let Some(text) = resp_body_text {
         resp_content["text"] = json!(text);
+    } else {
+        resp_content["text"] = json!(base64::engine::general_purpose::STANDARD.encode(&resp.body));
+        resp_content["encoding"] = json!("base64");
     }
 
     json!({
@@ -195,20 +210,20 @@ fn har_entry(entry: &HistoryEntry) -> serde_json::Value {
     })
 }
 
-fn chrono_lite_iso(epoch_secs: u64) -> String {
-    let days = epoch_secs / 86400;
-    let time_of_day = epoch_secs % 86400;
-
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    let (year, month, day) = super::days_to_date(days);
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
+fn format_iso_timestamp(timestamp: std::time::SystemTime) -> String {
+    let nanos = match timestamp.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => i128::try_from(duration.as_nanos()).ok(),
+        Err(error) => i128::try_from(error.duration().as_nanos())
+            .ok()
+            .map(|nanos| -nanos),
+    };
+    nanos
+        .and_then(|nanos| time::OffsetDateTime::from_unix_timestamp_nanos(nanos).ok())
+        .and_then(|date| {
+            date.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".into())
 }
 
 fn har_timings(resp: &super::models::ResponseData) -> serde_json::Value {
@@ -248,6 +263,43 @@ mod tests {
     use bytes::Bytes;
     use std::time::{Duration, UNIX_EPOCH};
 
+    #[cfg(unix)]
+    #[test]
+    fn exported_shell_arguments_cannot_execute_syntax() {
+        let mut request = make_request(
+            "GET';printf injected;#",
+            "http://example.com/?q=';printf injected;#",
+            "example.com",
+            false,
+        );
+        request.headers = vec![(
+            "X-';printf injected;#".into(),
+            "$(printf injected)\n'".into(),
+        )];
+        request.body = Bytes::from_static(b"body'\n$(printf injected)");
+        let entry = make_entry(request.clone(), None);
+        // Replace curl with an argument dumper, never invoking a network client.
+        let script = format!("curl() {{ printf '%s\\0' \"$@\"; }}\n{}", to_curl(&entry));
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let args: Vec<_> = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .collect();
+        assert_eq!(args[1], request.method.as_bytes());
+        assert_eq!(args[3], request.uri.as_bytes());
+        assert_eq!(
+            args[5],
+            format!("{}: {}", request.headers[0].0, request.headers[0].1).as_bytes()
+        );
+        assert_eq!(args[7], request.body.as_ref());
+    }
+
     fn make_request(method: &str, uri: &str, host: &str, is_tls: bool) -> RequestData {
         RequestData {
             id: RequestId(1),
@@ -285,6 +337,7 @@ mod tests {
             ws_messages: vec![],
             grpc_messages: vec![],
             findings: vec![],
+            request_body_truncated: false,
         }
     }
 
@@ -293,7 +346,7 @@ mod tests {
         let req = make_request("GET", "/path", "example.com", true);
         let entry = make_entry(req, None);
         let curl = to_curl(&entry);
-        assert!(curl.starts_with("curl -X GET 'https://example.com/path'"));
+        assert!(curl.starts_with("curl -X 'GET' --url 'https://example.com/path'"));
     }
 
     #[test]
@@ -325,7 +378,7 @@ mod tests {
         req.body = Bytes::from("{\"key\":\"value\"}");
         let entry = make_entry(req, None);
         let curl = to_curl(&entry);
-        assert!(curl.contains("-d '{\"key\":\"value\"}'"));
+        assert!(curl.contains("--data-binary '{\"key\":\"value\"}'"));
     }
 
     #[test]
@@ -459,19 +512,37 @@ mod tests {
     }
 
     #[test]
-    fn chrono_lite_iso_epoch() {
-        assert_eq!(chrono_lite_iso(0), "1970-01-01T00:00:00Z");
+    fn iso_timestamp_epoch() {
+        assert_eq!(format_iso_timestamp(UNIX_EPOCH), "1970-01-01T00:00:00Z");
     }
 
     #[test]
-    fn chrono_lite_iso_known_date() {
+    fn iso_timestamp_known_date() {
         // 2024-01-01T00:00:00Z = 1704067200
-        assert_eq!(chrono_lite_iso(1704067200), "2024-01-01T00:00:00Z");
+        assert_eq!(
+            format_iso_timestamp(UNIX_EPOCH + Duration::from_secs(1704067200)),
+            "2024-01-01T00:00:00Z"
+        );
     }
 
     #[test]
-    fn chrono_lite_iso_with_time() {
+    fn iso_timestamp_with_time() {
         // 2024-01-01T12:30:45Z = 1704067200 + 12*3600 + 30*60 + 45 = 1704112245
-        assert_eq!(chrono_lite_iso(1704112245), "2024-01-01T12:30:45Z");
+        assert_eq!(
+            format_iso_timestamp(UNIX_EPOCH + Duration::from_secs(1704112245)),
+            "2024-01-01T12:30:45Z"
+        );
+    }
+
+    #[test]
+    fn iso_timestamp_preserves_subseconds_and_dates_before_epoch() {
+        assert_eq!(
+            format_iso_timestamp(UNIX_EPOCH + Duration::from_millis(125)),
+            "1970-01-01T00:00:00.125Z"
+        );
+        assert_eq!(
+            format_iso_timestamp(UNIX_EPOCH - Duration::from_secs(1)),
+            "1969-12-31T23:59:59Z"
+        );
     }
 }

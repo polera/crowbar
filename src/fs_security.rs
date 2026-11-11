@@ -29,7 +29,10 @@ pub fn write_private_with(
     path: &Path,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         if parent.exists() {
             if !parent.is_dir() {
                 return Err(std::io::Error::new(
@@ -71,10 +74,15 @@ pub fn write_private_with(
 
     let result = (|| {
         write(&mut file)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, path)?;
-        set_private_file_permissions(path)
+        Ok(())
     })();
 
     if result.is_err() {

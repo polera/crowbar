@@ -20,7 +20,9 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
-    pub fn new(bind_addr: SocketAddr, ctx: ProxyContext, cancel: CancellationToken) -> Self {
+    pub fn new(bind_addr: SocketAddr, mut ctx: ProxyContext, cancel: CancellationToken) -> Self {
+        ctx.cancel = cancel.clone();
+        ctx.tasks = tokio_util::task::TaskTracker::new();
         Self {
             bind_addr,
             ctx,
@@ -29,24 +31,30 @@ impl ProxyServer {
     }
 
     pub async fn run(self, listener: TcpListener) -> anyhow::Result<()> {
+        let _cancel_on_exit = self.cancel.clone().drop_guard();
         info!("Proxy listening on {}", self.bind_addr);
 
-        let handler = Arc::new(ProxyHandler::new(self.ctx));
-        let connections = Arc::new(Semaphore::new(handler.limits().max_connections));
+        let connections = Arc::new(Semaphore::new(self.ctx.limits.max_connections));
 
         loop {
+            let permit = tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => break,
+                permit = connections.clone().acquire_owned() => permit?,
+            };
             tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {
+                    info!("Proxy server shutting down");
+                    break;
+                }
                 result = listener.accept() => {
                     let (stream, client_addr) = result?;
-                    let handler = handler.clone();
-                    let permit = connections
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| anyhow::anyhow!("connection limiter closed"))?;
+                    let mut ctx = self.ctx.clone();
+                    ctx.connection_permit = Some(Arc::new(permit));
+                    let handler = Arc::new(ProxyHandler::new(ctx.clone()));
 
-                    tokio::spawn(async move {
-                        let _permit = permit;
+                    ctx.spawn(async move {
                         let io = TokioIo::new(stream);
                         let svc = service_fn(move |req| {
                             let handler = handler.clone();
@@ -61,18 +69,18 @@ impl ProxyServer {
                             .serve_connection(io, svc)
                             .with_upgrades()
                             .await
-                            && !e.to_string().contains("connection closed")
+                            && !e.is_incomplete_message() && !e.is_closed()
                         {
                             error!("Connection error from {}: {}", client_addr, e);
                         }
                     });
                 }
-                _ = self.cancel.cancelled() => {
-                    info!("Proxy server shutting down");
-                    break;
-                }
             }
         }
+
+        self.cancel.cancel();
+        self.ctx.tasks.close();
+        self.ctx.tasks.wait().await;
 
         Ok(())
     }

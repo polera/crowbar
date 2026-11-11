@@ -17,6 +17,13 @@ use super::App;
 impl App {
     pub fn prepare_render(&mut self) {
         self.store.refresh_filter_cache(&self.history.filter);
+        self.history.selected = self
+            .history
+            .selected
+            .min(self.store.filtered_count().saturating_sub(1));
+        self.intercept_ui
+            .queue
+            .retain(|request| self.intercept_state.is_pending(request.id));
     }
 
     pub fn render(&self, frame: &mut Frame) {

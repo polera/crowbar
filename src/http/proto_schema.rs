@@ -300,14 +300,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-        .collect::<Result<_, _>>()
-        .ok()
+    super::hex_decode(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +326,9 @@ fn parse_message(
     pos: &mut usize,
     depth: usize,
 ) -> Option<DynamicMessage> {
+    if depth > 64 {
+        return None;
+    }
     let mut msg = DynamicMessage::new(desc.clone());
     let mut lists: HashMap<u32, Vec<Value>> = HashMap::new();
 

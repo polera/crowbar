@@ -8,6 +8,8 @@ mod http;
 mod proxy;
 mod rules;
 mod scanning;
+#[cfg(test)]
+mod test_support;
 mod tls;
 mod tui;
 
@@ -91,13 +93,17 @@ async fn main() -> anyhow::Result<()> {
         let base_port = addr.port();
         let mut result = None;
         for i in 0..25 {
-            addr.set_port(base_port + i);
+            let Some(port) = base_port.checked_add(i) else {
+                break;
+            };
+            addr.set_port(port);
             match TcpListener::bind(addr).await {
                 Ok(l) => {
                     if i > 0 {
                         info!("Port {} in use, bound to {} instead", base_port, addr);
                     }
-                    result = Some((l, addr));
+                    let bound_addr = l.local_addr()?;
+                    result = Some((l, bound_addr));
                     break;
                 }
                 Err(e) => {
@@ -112,14 +118,14 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = bound.as_ref().map(|(_, a)| *a).unwrap_or(config.bind);
 
     if let Some((listener, _)) = bound {
-        let ctx = ProxyContext {
+        let ctx = ProxyContext::new(
             ui_tx,
-            cert_cache: cert_cache.clone(),
-            intercept: intercept.clone(),
-            scope: scope.clone(),
-            rules: rules.clone(),
-            limits: config.limits,
-        };
+            cert_cache.clone(),
+            intercept.clone(),
+            scope.clone(),
+            rules.clone(),
+            config.limits,
+        );
         let server = ProxyServer::new(bind_addr, ctx, cancel.clone());
         tokio::spawn(async move {
             if let Err(e) = server.run(listener).await {
@@ -130,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         info!(
             "Could not bind to ports {}-{}; starting without proxy",
             config.bind.port(),
-            config.bind.port() + 24,
+            config.bind.port().saturating_add(24),
         );
     }
 
@@ -152,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
             format!(
                 "Could not bind to ports {}-{}. Press 'b' to specify a bind address.",
                 config.bind.port(),
-                config.bind.port() + 24,
+                config.bind.port().saturating_add(24),
             ),
             std::time::Instant::now(),
         ));
@@ -204,17 +210,18 @@ async fn run_app(
         if let Some(new_addr) = app.pending_rebind.take() {
             match TcpListener::bind(new_addr).await {
                 Ok(listener) => {
+                    let new_addr = listener.local_addr()?;
                     cancel.cancel();
                     *cancel = CancellationToken::new();
 
-                    let ctx = ProxyContext {
-                        ui_tx: app.ui_tx.clone(),
-                        cert_cache: cert_cache.clone(),
-                        intercept: app.intercept_state.clone(),
-                        scope: app.scope.clone(),
-                        rules: app.rules.clone(),
-                        limits: app.proxy_limits,
-                    };
+                    let ctx = ProxyContext::new(
+                        app.ui_tx.clone(),
+                        cert_cache.clone(),
+                        app.intercept_state.clone(),
+                        app.scope.clone(),
+                        app.rules.clone(),
+                        app.proxy_limits,
+                    );
                     let server = ProxyServer::new(new_addr, ctx, cancel.clone());
                     tokio::spawn(async move {
                         if let Err(e) = server.run(listener).await {
