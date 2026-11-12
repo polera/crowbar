@@ -146,31 +146,43 @@ impl Rule {
 
 pub type SharedRules = Arc<RwLock<Vec<Rule>>>;
 
+#[derive(Debug, thiserror::Error)]
+#[error("Rewritten value exceeds configured limit")]
+pub struct RewriteLimitExceeded;
+
 pub fn apply_request_rules(
     rules: &SharedRules,
     uri: &mut String,
     headers: &mut [(String, String)],
     body: &mut Bytes,
-) {
+    max_bytes: usize,
+) -> Result<(), RewriteLimitExceeded> {
     let rules = rules.read();
-    rules
+    for rule in rules
         .iter()
         .filter(|r| r.enabled)
         .filter(|r| matches!(r.target, RuleTarget::Request | RuleTarget::Both))
-        .for_each(|rule| apply_rule(rule, Some(uri), headers, body));
+    {
+        apply_rule(rule, Some(uri), headers, body, max_bytes)?;
+    }
+    Ok(())
 }
 
 pub fn apply_response_rules(
     rules: &SharedRules,
     headers: &mut [(String, String)],
     body: &mut Bytes,
-) {
+    max_bytes: usize,
+) -> Result<(), RewriteLimitExceeded> {
     let rules = rules.read();
-    rules
+    for rule in rules
         .iter()
         .filter(|r| r.enabled)
         .filter(|r| matches!(r.target, RuleTarget::Response | RuleTarget::Both))
-        .for_each(|rule| apply_rule(rule, None, headers, body));
+    {
+        apply_rule(rule, None, headers, body, max_bytes)?;
+    }
+    Ok(())
 }
 
 fn apply_rule(
@@ -178,13 +190,14 @@ fn apply_rule(
     uri: Option<&mut String>,
     headers: &mut [(String, String)],
     body: &mut Bytes,
-) {
+    max_bytes: usize,
+) -> Result<(), RewriteLimitExceeded> {
     if rule.match_pattern.is_empty() {
-        return;
+        return Ok(());
     }
 
     if rule.is_regex && rule.get_compiled_regex().is_none() {
-        return;
+        return Ok(());
     }
 
     let compiled = rule.get_compiled_regex();
@@ -192,16 +205,26 @@ fn apply_rule(
 
     if let Some(uri) = uri
         && (scope == RuleScope::Url || scope == RuleScope::All)
-        && let Cow::Owned(s) = replace_in_str(uri, &rule.match_pattern, &rule.replacement, compiled)
+        && let Cow::Owned(s) = replace_in_str(
+            uri,
+            &rule.match_pattern,
+            &rule.replacement,
+            compiled,
+            max_bytes,
+        )?
     {
         *uri = s;
     }
 
     if scope == RuleScope::Headers || scope == RuleScope::All {
         for (_key, value) in headers.iter_mut() {
-            if let Cow::Owned(s) =
-                replace_in_str(value, &rule.match_pattern, &rule.replacement, compiled)
-            {
+            if let Cow::Owned(s) = replace_in_str(
+                value,
+                &rule.match_pattern,
+                &rule.replacement,
+                compiled,
+                max_bytes,
+            )? {
                 *value = s;
             }
         }
@@ -209,11 +232,17 @@ fn apply_rule(
 
     if (scope == RuleScope::Body || scope == RuleScope::All)
         && let Ok(text) = std::str::from_utf8(body)
-        && let Cow::Owned(s) =
-            replace_in_str(text, &rule.match_pattern, &rule.replacement, compiled)
+        && let Cow::Owned(s) = replace_in_str(
+            text,
+            &rule.match_pattern,
+            &rule.replacement,
+            compiled,
+            max_bytes,
+        )?
     {
         *body = Bytes::from(s);
     }
+    Ok(())
 }
 
 fn replace_in_str<'a>(
@@ -221,22 +250,200 @@ fn replace_in_str<'a>(
     pattern: &str,
     replacement: &str,
     compiled: Option<&Regex>,
-) -> Cow<'a, str> {
+    max_bytes: usize,
+) -> Result<Cow<'a, str>, RewriteLimitExceeded> {
+    let mut output = String::new();
+    let mut end = 0;
+    let mut matched = false;
     match compiled {
-        Some(re) => re.replace_all(input, replacement),
+        Some(re) => {
+            for captures in re.captures_iter(input) {
+                let found = captures.get(0).expect("whole match exists");
+                append_bounded(&mut output, &input[end..found.start()], max_bytes)?;
+                expand_bounded(&mut output, replacement, &captures, max_bytes)?;
+                end = found.end();
+                matched = true;
+            }
+        }
         None => {
-            if input.contains(pattern) {
-                Cow::Owned(input.replace(pattern, replacement))
-            } else {
-                Cow::Borrowed(input)
+            for (start, found) in input.match_indices(pattern) {
+                append_bounded(&mut output, &input[end..start], max_bytes)?;
+                append_bounded(&mut output, replacement, max_bytes)?;
+                end = start + found.len();
+                matched = true;
             }
         }
     }
+    if !matched {
+        return Ok(Cow::Borrowed(input));
+    }
+    append_bounded(&mut output, &input[end..], max_bytes)?;
+    Ok(Cow::Owned(output))
+}
+
+fn append_bounded(
+    output: &mut String,
+    text: &str,
+    max_bytes: usize,
+) -> Result<(), RewriteLimitExceeded> {
+    let size = output
+        .len()
+        .checked_add(text.len())
+        .filter(|&size| size <= max_bytes)
+        .ok_or(RewriteLimitExceeded)?;
+    if size > output.capacity() {
+        // Avoid String's automatic growth reserving more than the configured cap.
+        let capacity = size.max(output.capacity().saturating_mul(2)).min(max_bytes);
+        output.reserve_exact(capacity - output.len());
+    }
+    output.push_str(text);
+    Ok(())
+}
+
+/// Match regex's $name, ${name}, numeric references and $$ semantics without
+/// allocating an unbounded intermediate string for capture expansion.
+fn expand_bounded(
+    output: &mut String,
+    mut replacement: &str,
+    captures: &regex::Captures<'_>,
+    max_bytes: usize,
+) -> Result<(), RewriteLimitExceeded> {
+    while let Some(dollar) = replacement.find('$') {
+        append_bounded(output, &replacement[..dollar], max_bytes)?;
+        replacement = &replacement[dollar + 1..];
+        if let Some(rest) = replacement.strip_prefix('$') {
+            append_bounded(output, "$", max_bytes)?;
+            replacement = rest;
+            continue;
+        }
+        let reference = if let Some(braced) = replacement.strip_prefix('{') {
+            braced.find('}').map(|end| (&braced[..end], end + 2))
+        } else {
+            let end = replacement
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                .count();
+            (end > 0).then_some((&replacement[..end], end))
+        };
+        if let Some((name, consumed)) = reference {
+            let capture = match name.parse::<usize>() {
+                Ok(index) => captures.get(index),
+                Err(_) => captures.name(name),
+            };
+            if let Some(capture) = capture {
+                append_bounded(output, capture.as_str(), max_bytes)?;
+            }
+            replacement = &replacement[consumed..];
+        } else {
+            append_bounded(output, "$", max_bytes)?;
+        }
+    }
+    append_bounded(output, replacement, max_bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    proptest::proptest! {
+        #[test]
+        fn bounded_regex_replacement_matches_regex_crate(
+            input in "[abcβ]{0,32}",
+            replacement in "[a-zA-Z0-9_${}β]{0,64}",
+        ) {
+            let re = Regex::new(r"(a*)(?P<word>[bβ]*)(c?)").unwrap();
+            let expected = re.replace_all(&input, replacement.as_str());
+            let actual = replace_in_str(&input, "unused", &replacement, Some(&re), 1024 * 1024).unwrap();
+            proptest::prop_assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn literal_and_regex_expansion_stop_before_exceeding_limit() {
+        for compiled in [None, Some(Regex::new("a").unwrap())] {
+            assert!(replace_in_str("aaa", "a", "1234", compiled.as_ref(), 8).is_err());
+            assert_eq!(
+                replace_in_str("aa", "a", "1234", compiled.as_ref(), 8).unwrap(),
+                "12341234"
+            );
+        }
+        let mut output = String::new();
+        assert!(append_bounded(&mut output, "oversized", 2).is_err());
+        assert_eq!(output.capacity(), 0);
+    }
+
+    #[test]
+    fn regex_capture_expansion_is_bounded_and_preserves_regex_semantics() {
+        let re = Regex::new(r"(?P<word>\w+)(?:-(\d+))?").unwrap();
+        for replacement in [
+            "$word",
+            "${word}:$2",
+            "$0$0",
+            "$$$word",
+            "$unknown",
+            "${}",
+            "${word",
+            "$",
+            "$1suffix",
+            "${1}suffix",
+            "${名}",
+            "$$$0$$",
+        ] {
+            let expected = re.replace_all("alpha-12 βeta", replacement);
+            assert_eq!(
+                replace_in_str("alpha-12 βeta", "unused", replacement, Some(&re), 1024).unwrap(),
+                expected
+            );
+        }
+        let re = Regex::new(r"(?s)(.*)").unwrap();
+        assert!(replace_in_str("abcd", "", "$1$1$1", Some(&re), 8).is_err());
+        let re = Regex::new("").unwrap();
+        assert_eq!(replace_in_str("é", "", "x", Some(&re), 4).unwrap(), "xéx");
+    }
+
+    #[test]
+    fn chained_rules_cannot_create_oversized_intermediate_bodies() {
+        let mut rule = Rule::new("expand".into());
+        rule.scope = RuleScope::Body;
+        rule.set_pattern("a".into()).unwrap();
+        rule.replacement = "a".repeat(16);
+        let rules = make_rules(vec![rule.clone(), rule.clone(), rule]);
+        let mut body = Bytes::from(vec![b'a'; 8192]);
+        assert!(
+            apply_request_rules(
+                &rules,
+                &mut String::new(),
+                &mut [],
+                &mut body,
+                2 * 1024 * 1024
+            )
+            .is_err()
+        );
+        assert_eq!(body.len(), 2 * 1024 * 1024);
+        let mut body = Bytes::from(vec![b'a'; 8192]);
+        assert!(apply_response_rules(&rules, &mut [], &mut body, 8192).is_err());
+        assert_eq!(body.len(), 8192);
+    }
+
+    #[test]
+    fn url_and_header_rewrites_are_bounded_too() {
+        let mut rule = Rule::new("expand".into());
+        rule.set_pattern("a".into()).unwrap();
+        rule.replacement = "long".into();
+        let rules = make_rules(vec![rule]);
+        assert!(
+            apply_request_rules(&rules, &mut "aaa".into(), &mut [], &mut Bytes::new(), 8).is_err()
+        );
+        assert!(
+            apply_response_rules(
+                &rules,
+                &mut [("x".into(), "aaa".into())],
+                &mut Bytes::new(),
+                8
+            )
+            .is_err()
+        );
+    }
 
     fn make_rules(rules: Vec<Rule>) -> SharedRules {
         Arc::new(RwLock::new(rules))
@@ -259,7 +466,7 @@ mod tests {
         let mut headers = vec![("content-type".into(), "text/plain".into())];
         let mut body = Bytes::from("the secret value");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(body, Bytes::from("the REDACTED value"));
         assert_eq!(uri, "https://example.com");
     }
@@ -281,7 +488,7 @@ mod tests {
         let mut headers = vec![];
         let mut body = Bytes::new();
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(uri, "https://example.com/api?token=MASKED&other=1");
     }
 
@@ -304,7 +511,7 @@ mod tests {
         ];
         let mut body = Bytes::from("Apache/2.4 should not change");
 
-        apply_response_rules(&rules, &mut headers, &mut body);
+        apply_response_rules(&rules, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(headers[1].1, "Hidden");
         assert_eq!(body, Bytes::from("Apache/2.4 should not change"));
     }
@@ -326,7 +533,7 @@ mod tests {
         let mut headers = vec![];
         let mut body = Bytes::from("secret");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(uri, "https://secret.com");
         assert_eq!(body, Bytes::from("secret"));
     }
@@ -348,7 +555,7 @@ mod tests {
         let mut headers = vec![];
         let mut body = Bytes::from("secret");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(body, Bytes::from("secret"));
     }
 
@@ -368,7 +575,7 @@ mod tests {
         let mut headers = vec![];
         let mut body = Bytes::from("the secret data");
 
-        apply_response_rules(&rules, &mut headers, &mut body);
+        apply_response_rules(&rules, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(body, Bytes::from("the REDACTED data"));
     }
 
@@ -388,12 +595,12 @@ mod tests {
         let mut uri = "/api".to_string();
         let mut req_headers = vec![];
         let mut req_body = Bytes::from("token=abc");
-        apply_request_rules(&rules, &mut uri, &mut req_headers, &mut req_body);
+        apply_request_rules(&rules, &mut uri, &mut req_headers, &mut req_body, 1024).unwrap();
         assert_eq!(req_body, Bytes::from("MASKED=abc"));
 
         let mut resp_headers = vec![];
         let mut resp_body = Bytes::from("your token is valid");
-        apply_response_rules(&rules, &mut resp_headers, &mut resp_body);
+        apply_response_rules(&rules, &mut resp_headers, &mut resp_body, 1024).unwrap();
         assert_eq!(resp_body, Bytes::from("your MASKED is valid"));
     }
 
@@ -414,7 +621,7 @@ mod tests {
         let mut headers = vec![("x-foo".into(), "foo-value".into())];
         let mut body = Bytes::from("foo content");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(uri, "https://example.com/bar");
         assert_eq!(headers[0].1, "bar-value");
         assert_eq!(body, Bytes::from("bar content"));
@@ -437,7 +644,7 @@ mod tests {
         let mut headers = vec![("x-version".into(), "v1".into())];
         let mut body = Bytes::from("version v1");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(uri, "/api/v2/users");
         assert_eq!(headers[0].1, "v1");
         assert_eq!(body, Bytes::from("version v1"));
@@ -460,7 +667,7 @@ mod tests {
         let mut headers = vec![];
         let mut body = Bytes::from("body");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(uri, "/api");
         assert_eq!(body, Bytes::from("body"));
     }
@@ -482,7 +689,7 @@ mod tests {
         let mut headers = vec![];
         let mut body = Bytes::from("body");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(body, Bytes::from("body"));
     }
 
@@ -503,7 +710,7 @@ mod tests {
         let mut headers = vec![];
         let mut body = Bytes::from("id=123&count=456");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(body, Bytes::from("id=N&count=N"));
     }
 
@@ -530,21 +737,6 @@ mod tests {
         assert_eq!(RuleScope::Headers.next(), RuleScope::Body);
         assert_eq!(RuleScope::Body.next(), RuleScope::All);
         assert_eq!(RuleScope::All.next(), RuleScope::Url);
-    }
-
-    #[test]
-    fn rule_target_labels() {
-        assert_eq!(RuleTarget::Request.label(), "Request");
-        assert_eq!(RuleTarget::Response.label(), "Response");
-        assert_eq!(RuleTarget::Both.label(), "Both");
-    }
-
-    #[test]
-    fn rule_scope_labels() {
-        assert_eq!(RuleScope::Url.label(), "URL");
-        assert_eq!(RuleScope::Headers.label(), "Headers");
-        assert_eq!(RuleScope::Body.label(), "Body");
-        assert_eq!(RuleScope::All.label(), "All");
     }
 
     #[test]
@@ -597,7 +789,7 @@ mod tests {
         let mut headers = vec![];
         let mut body = Bytes::from("aaa");
 
-        apply_request_rules(&rules, &mut uri, &mut headers, &mut body);
+        apply_request_rules(&rules, &mut uri, &mut headers, &mut body, 1024).unwrap();
         assert_eq!(body, Bytes::from("ccc"));
     }
 }

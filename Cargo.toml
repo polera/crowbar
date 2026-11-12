@@ -1,6 +1,6 @@
 [package]
 name = "crowbar"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 rust-version = "1.88"
 description = "A TUI web security testing proxy"
@@ -53,6 +53,8 @@ prost = "0.14"
 prost-types = "0.14"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 parking_lot = "0.12"
+fs2 = "0.4"
+libc = "0.2"
 time = { version = "0.3", features = ["parsing", "formatting"] }
 
 [dev-dependencies]

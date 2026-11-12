@@ -39,6 +39,7 @@ impl App {
                     self.intercept_ui.editor =
                         TextEditor::new(codec::request_to_lines(req), self.editor_mode);
                     self.intercept_ui.editing = true;
+                    self.intercept_ui.editing_id = Some(req.id);
                     self.intercept_ui.scroll = 0;
                 }
             }
@@ -596,6 +597,7 @@ impl App {
             EditorAction::ExitEditor => match target {
                 EditorTarget::Intercept => {
                     self.intercept_ui.editing = false;
+                    self.intercept_ui.editing_id = None;
                     self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
                 }
                 EditorTarget::Repeater => {

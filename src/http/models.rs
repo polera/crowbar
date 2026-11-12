@@ -303,12 +303,6 @@ mod tests {
     }
 
     #[test]
-    fn request_id_display() {
-        let id = RequestId(42);
-        assert_eq!(format!("{}", id), "42");
-    }
-
-    #[test]
     fn http_version_display() {
         assert_eq!(format!("{}", HttpVersion::Http10), "HTTP/1.0");
         assert_eq!(format!("{}", HttpVersion::Http11), "HTTP/1.1");

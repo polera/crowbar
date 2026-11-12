@@ -411,12 +411,16 @@ async fn handle_http_request(
         }
     }
 
-    rules::apply_request_rules(
+    if let Err(error) = rules::apply_request_rules(
         &ctx.rules,
         &mut request_data.uri,
         &mut request_data.headers,
         &mut request_data.body,
-    );
+        ctx.limits.max_body_bytes,
+    ) {
+        ctx.report_error(request_id, error.to_string()).await;
+        return Ok(crate::proxy::bad_gateway(&error.to_string()));
+    }
 
     let fallback_authority = request_data
         .headers
@@ -904,13 +908,17 @@ async fn handle_h2_request(
         }
     }
 
-    if !is_grpc {
-        rules::apply_request_rules(
+    if !is_grpc
+        && let Err(error) = rules::apply_request_rules(
             &ctx.rules,
             &mut request_data.uri,
             &mut request_data.headers,
             &mut request_data.body,
-        );
+            ctx.limits.max_body_bytes,
+        )
+    {
+        ctx.report_error(request_id, error.to_string()).await;
+        return Ok(h2_bad_gateway(&error.to_string()));
     }
 
     let fallback_authority = request_data
@@ -1086,7 +1094,15 @@ async fn build_buffered_response(
     let trailer_pairs = crate::http::models::extract_trailers(resp_trailers.as_ref());
 
     let mut resp_headers_mut = resp_headers;
-    rules::apply_response_rules(&ctx.rules, &mut resp_headers_mut, &mut resp_body);
+    if let Err(error) = rules::apply_response_rules(
+        &ctx.rules,
+        &mut resp_headers_mut,
+        &mut resp_body,
+        ctx.limits.max_body_bytes,
+    ) {
+        ctx.report_error(request_id, error.to_string()).await;
+        return Ok(h2_bad_gateway(&error.to_string()));
+    }
     if resp_body.len() > ctx.limits.max_body_bytes {
         return Ok(h2_bad_gateway(
             "Rewritten response body exceeds configured limit",

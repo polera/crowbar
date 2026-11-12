@@ -506,9 +506,18 @@ mod tests {
         let har = to_har(&[entry]);
         let parsed: serde_json::Value = serde_json::from_str(&har).unwrap();
         let timings = &parsed["log"]["entries"][0]["timings"];
-        assert!(timings["connect"].as_f64().unwrap() > 0.0);
-        assert!(timings["ssl"].as_f64().unwrap() > 0.0);
-        assert!(timings["wait"].as_f64().unwrap() > 0.0);
+        assert_eq!(
+            timings,
+            &json!({
+                "blocked": -1,
+                "dns": -1,
+                "connect": 10.0,
+                "send": 0,
+                "wait": 50.0,
+                "receive": 30.0,
+                "ssl": 20.0,
+            })
+        );
     }
 
     #[test]

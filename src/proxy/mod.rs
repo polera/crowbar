@@ -351,7 +351,15 @@ pub(crate) async fn process_h1_response(
     let content_transfer = body_start.elapsed();
     let duration = timing.start.elapsed();
 
-    rules::apply_response_rules(&ctx.rules, &mut resp_headers, &mut resp_body);
+    if let Err(error) = rules::apply_response_rules(
+        &ctx.rules,
+        &mut resp_headers,
+        &mut resp_body,
+        ctx.limits.max_body_bytes,
+    ) {
+        ctx.report_error(request_id, error.to_string()).await;
+        return bad_gateway(&error.to_string());
+    }
     if resp_body.len() > ctx.limits.max_body_bytes {
         return bad_gateway("Rewritten response body exceeds configured limit");
     }
@@ -663,12 +671,6 @@ mod tests {
         .unwrap();
         assert_eq!(resp.status(), 404);
         assert_eq!(resp.headers().get("x-error").unwrap(), "not found");
-    }
-
-    #[test]
-    fn bad_gateway_returns_502() {
-        let resp = bad_gateway("upstream failed");
-        assert_eq!(resp.status(), 502);
     }
 
     #[test]

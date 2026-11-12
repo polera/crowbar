@@ -31,6 +31,7 @@ pub struct HistoryState {
 
 pub struct InterceptUiState {
     pub queue: VecDeque<RequestData>,
+    pub editing_id: Option<RequestId>,
     pub scroll: u16,
     pub editing: bool,
     pub editor: TextEditor,
@@ -233,6 +234,7 @@ impl App {
             },
             intercept_ui: InterceptUiState {
                 queue: VecDeque::new(),
+                editing_id: None,
                 scroll: 0,
                 editing: false,
                 editor: TextEditor::new(vec![], editor_mode),

@@ -127,7 +127,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn registration_precedes_publication_and_cancelled_requests_are_removed() {
+    async fn published_request_can_be_resolved_by_id() {
         let state = InterceptState::new(true);
         let (sender, mut receiver) = mpsc::channel(1);
         let request = crate::test_support::request();
@@ -136,13 +136,22 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            receiver.recv().await,
-            Some(ProxyToUi::InterceptedRequest(_))
-        ));
+        let Some(ProxyToUi::InterceptedRequest(published)) = receiver.recv().await else {
+            panic!("expected an intercepted request");
+        };
+        assert_eq!(published.id, request.id);
         assert!(state.is_pending(request.id));
         assert!(state.resolve(request.id, InterceptDecision::Drop));
         assert!(matches!(decision.await, Ok(InterceptDecision::Drop)));
+        assert!(!state.is_pending(request.id));
+        assert!(!state.resolve(request.id, InterceptDecision::Forward));
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_decision_removes_registration() {
+        let state = InterceptState::new(true);
+        let (sender, _receiver) = mpsc::channel(1);
+        let request = crate::test_support::request();
         let pending = state
             .intercept_request(&request, &sender)
             .await
@@ -154,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_channel_waits_instead_of_bypassing_interception() {
-        let state = Arc::new(InterceptState::new(true));
+        let state = InterceptState::new(true);
         let (sender, mut receiver) = mpsc::channel(1);
         sender
             .send(ProxyToUi::RequestCaptured(crate::test_support::request()))
@@ -162,15 +171,16 @@ mod tests {
             .unwrap();
         let request = crate::test_support::request();
         let id = request.id;
-        let worker = {
-            let state = state.clone();
-            tokio::spawn(async move { state.intercept_request(&request, &sender).await })
+        let registration = state.intercept_request(&request, &sender);
+        tokio::pin!(registration);
+        assert!(futures::poll!(&mut registration).is_pending());
+        assert!(!state.is_pending(id));
+        receiver.recv().await.unwrap();
+        let decision = registration.await.unwrap().unwrap();
+        let Some(ProxyToUi::InterceptedRequest(published)) = receiver.recv().await else {
+            panic!("expected an intercepted request after capacity was freed");
         };
-        tokio::task::yield_now().await;
-        assert!(!worker.is_finished());
-        receiver.recv().await.unwrap();
-        let decision = worker.await.unwrap().unwrap().unwrap();
-        receiver.recv().await.unwrap();
+        assert_eq!(published.id, id);
         assert!(state.resolve(id, InterceptDecision::Forward));
         assert!(matches!(decision.await, Ok(InterceptDecision::Forward)));
     }
@@ -205,24 +215,23 @@ mod tests {
 
     #[tokio::test]
     async fn disabling_while_registration_waits_for_capacity_leaves_no_orphan() {
-        let state = Arc::new(InterceptState::new(true));
+        let state = InterceptState::new(true);
         let (sender, mut receiver) = mpsc::channel(1);
         sender
             .send(ProxyToUi::RequestCaptured(crate::test_support::request()))
             .await
             .unwrap();
-        let worker = {
-            let state = state.clone();
-            tokio::spawn(async move {
-                state
-                    .intercept_request(&crate::test_support::request(), &sender)
-                    .await
-            })
-        };
-        tokio::task::yield_now().await;
+        let request = crate::test_support::request();
+        let registration = state.intercept_request(&request, &sender);
+        tokio::pin!(registration);
+        assert!(futures::poll!(&mut registration).is_pending());
         assert!(!state.toggle());
         receiver.recv().await.unwrap();
-        assert!(worker.await.unwrap().unwrap().is_none());
+        assert!(registration.await.unwrap().is_none());
         assert!(state.control.lock().pending.is_empty());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 }

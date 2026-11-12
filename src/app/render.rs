@@ -24,6 +24,19 @@ impl App {
         self.intercept_ui
             .queue
             .retain(|request| self.intercept_state.is_pending(request.id));
+        if self.intercept_ui.editing_id.is_some_and(|id| {
+            !self
+                .intercept_ui
+                .queue
+                .iter()
+                .any(|request| request.id == id)
+        }) {
+            self.intercept_ui.editing = false;
+            self.intercept_ui.editing_id = None;
+            self.intercept_ui.editor = crate::editor::TextEditor::new(vec![], self.editor_mode);
+            self.intercept_ui.scroll = 0;
+            self.set_status("Intercepted request was cancelled; edits discarded");
+        }
     }
 
     pub fn render(&self, frame: &mut Frame) {

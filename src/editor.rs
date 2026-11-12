@@ -1019,13 +1019,12 @@ mod tests {
         assert_eq!(ed.lines[0], "hello!");
         ed.handle_key(key(KeyCode::Char('!')));
         assert_eq!(ed.lines[0], "hello!!");
-        // Each char insert saves undo, so undo once should restore "hello!"
-        let mut ed2 = editor("hello");
-        ed2.cursor_col = 5;
-        ed2.handle_key(key(KeyCode::Char('!')));
-        ed2.handle_key(key(KeyCode::Char('!')));
-        ed2.undo();
-        assert_eq!(ed2.lines[0], "hello!");
+        ed.undo();
+        assert_eq!(ed.lines[0], "hello!");
+        assert_eq!(ed.cursor_col, 6);
+        ed.undo();
+        assert_eq!(ed.lines[0], "hello");
+        assert_eq!(ed.cursor_col, 5);
     }
 
     #[test]
@@ -1330,16 +1329,62 @@ mod tests {
     fn render_lines_non_editing() {
         let ed = editor("hello\nworld");
         let lines = ed.render_lines(false);
-        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [" 1 hello", " 2 world"]
+        );
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.bg.is_none())
+        );
     }
 
     #[test]
     fn render_lines_editing_shows_cursor() {
-        let ed = editor("hello");
-        let lines = ed.render_lines(true);
-        assert_eq!(lines.len(), 1);
-        // Should have 4 spans: gutter, before cursor, cursor char, after cursor
-        assert_eq!(lines[0].spans.len(), 4);
+        for (row, column, before, cursor, after) in [
+            (0, 1, "h", "é", "llo"),
+            (0, 5, "héllo", " ", ""),
+            (1, 2, "wo", "r", "ld"),
+        ] {
+            let mut ed = editor("héllo\nworld");
+            ed.cursor_line = row;
+            ed.cursor_col = column;
+            let lines = ed.render_lines(true);
+            assert_eq!(lines.len(), 2);
+            let spans = &lines[row].spans;
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<Vec<_>>(),
+                [format!(" {} ", row + 1).as_str(), before, cursor, after]
+            );
+            assert_eq!(spans[2].style.bg, Some(Color::White));
+            assert_eq!(spans[2].style.fg, Some(Color::Black));
+            assert!(
+                spans
+                    .iter()
+                    .enumerate()
+                    .all(|(index, span)| index == 2 || span.style.bg.is_none())
+            );
+            let other_row = 1 - row;
+            assert_eq!(
+                lines[other_row].to_string(),
+                if other_row == 0 {
+                    " 1 héllo"
+                } else {
+                    " 2 world"
+                }
+            );
+            assert!(
+                lines[other_row]
+                    .spans
+                    .iter()
+                    .all(|span| span.style.bg.is_none())
+            );
+        }
     }
 
     // --- Enter returns Enter action (not consumed) ---

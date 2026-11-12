@@ -160,12 +160,16 @@ impl ProxyHandler {
             }
         }
 
-        rules::apply_request_rules(
+        if let Err(error) = rules::apply_request_rules(
             &self.ctx.rules,
             &mut request_data.uri,
             &mut request_data.headers,
             &mut request_data.body,
-        );
+            self.ctx.limits.max_body_bytes,
+        ) {
+            self.ctx.report_error(request_id, error.to_string()).await;
+            return Ok(crate::proxy::bad_gateway(&error.to_string()));
+        }
 
         let fallback_authority = request_data
             .headers

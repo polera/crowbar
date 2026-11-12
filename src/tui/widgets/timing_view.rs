@@ -84,6 +84,21 @@ fn format_duration_ms(ms: f64) -> String {
 mod tests {
     use super::*;
 
+    fn assert_phase(line: &Line<'_>, label: &str, duration: &str, filled: usize, color: Color) {
+        assert_eq!(line.spans.len(), 4);
+        assert_eq!(line.spans[0].content.trim(), label);
+        assert_eq!(line.spans[1].content, "█".repeat(filled));
+        assert_eq!(line.spans[1].style.fg, Some(color));
+        assert_eq!(line.spans[2].content, "░".repeat(24 - filled));
+        assert_eq!(line.spans[3].content.trim(), duration);
+    }
+
+    fn assert_total(line: &Line<'_>, duration: &str) {
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content.trim(), "Total");
+        assert_eq!(line.spans[1].content, duration);
+    }
+
     #[test]
     fn format_duration_sub_ms() {
         assert_eq!(format_duration_ms(0.42), "0.42ms");
@@ -131,8 +146,14 @@ mod tests {
         };
         let total = Duration::from_millis(115);
         let lines = timing_lines(&timing, total);
-        // header + 5 phases + total = 7 lines
         assert_eq!(lines.len(), 7);
+        assert!(lines[0].to_string().contains("Timing"));
+        assert_phase(&lines[1], "TCP Connect", "10ms", 2, Color::Cyan);
+        assert_phase(&lines[2], "TLS Handshake", "20ms", 4, Color::Magenta);
+        assert_phase(&lines[3], "HTTP Handshake", "5.0ms", 1, Color::Blue);
+        assert_phase(&lines[4], "Server Wait", "50ms", 10, Color::Yellow);
+        assert_phase(&lines[5], "Content Xfer", "30ms", 6, Color::Green);
+        assert_total(&lines[6], "115ms");
     }
 
     #[test]
@@ -146,20 +167,25 @@ mod tests {
         };
         let total = Duration::from_millis(60);
         let lines = timing_lines(&timing, total);
-        // header + 2 phases + total = 4 lines
         assert_eq!(lines.len(), 4);
+        assert_phase(&lines[1], "TCP Connect", "10ms", 4, Color::Cyan);
+        assert_phase(&lines[2], "Server Wait", "50ms", 20, Color::Yellow);
+        assert_total(&lines[3], "60ms");
     }
 
     #[test]
-    fn timing_lines_header_text() {
+    fn timing_bars_remain_within_width_for_tiny_and_over_total_phases() {
         let timing = TimingData {
-            tcp_connect: Some(Duration::from_millis(10)),
-            tls_handshake: None,
+            tcp_connect: Some(Duration::from_micros(1)),
+            tls_handshake: Some(Duration::from_millis(200)),
             http_handshake: None,
             time_to_first_byte: None,
             content_transfer: None,
         };
-        let lines = timing_lines(&timing, Duration::from_millis(10));
-        assert!(lines[0].spans[0].content.contains("Timing"));
+        let lines = timing_lines(&timing, Duration::from_millis(100));
+        assert_eq!(lines.len(), 4);
+        assert_phase(&lines[1], "TCP Connect", "0.00ms", 1, Color::Cyan);
+        assert_phase(&lines[2], "TLS Handshake", "200ms", 24, Color::Magenta);
+        assert_total(&lines[3], "100ms");
     }
 }

@@ -134,6 +134,11 @@ cannot be replayed or added to a macro. gRPC request and response bodies are
 forwarded as streams; interception and body-rewrite rules remain disabled for
 gRPC traffic.
 
+Match-and-replace output is bounded during each rule, including regex capture
+expansion, rather than only after all rules finish. Rewritten bodies, URLs, and
+individual header values may not exceed `--max-body-bytes`; an oversized rewrite
+rejects the request or response with a 502 error.
+
 Network operations have a 30-second deadline (including gRPC stream inactivity),
 and WebSocket relays close after 120 seconds without reads. Interception waits
 for the UI instead of forwarding requests when the UI queue is full.
@@ -146,6 +151,12 @@ sent as placeholder text.
 ### CA Certificate
 
 Crowbar generates a CA certificate on first run and stores it at `~/.crowbar/ca.pem`. Install it in your browser or system trust store to avoid TLS warnings.
+
+CA initialization is locked across instances, and the certificate is checked
+against its private key when loaded. An incomplete or mismatched pair causes a
+startup error instead of silently replacing existing CA material. Restore a
+matching pair from backup, or, with all instances stopped, move both `ca.pem` and
+`ca.key` aside to generate a new CA (which must then be trusted again).
 
 ```sh
 # Export to a file

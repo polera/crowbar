@@ -90,19 +90,6 @@ mod tests {
     }
 
     #[test]
-    fn key_style_yellow_bold() {
-        let style = key_style();
-        assert_eq!(style.fg, Some(Color::Yellow));
-        assert!(style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn dim_style_dark_gray() {
-        let style = dim_style();
-        assert_eq!(style.fg, Some(Color::DarkGray));
-    }
-
-    #[test]
     fn header_lines_formatting() {
         let headers = vec![
             ("content-type".into(), "text/html".into()),

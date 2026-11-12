@@ -256,6 +256,58 @@ async fn edited_http_bodies_have_correct_framing_and_preserve_header_octets() {
 }
 
 #[tokio::test]
+async fn oversized_request_rewrite_returns_502_and_reports_the_error() {
+    within(async {
+        let (ctx, mut events) = crate::test_support::context(ProxyLimits {
+            max_body_bytes: 8,
+            ..ProxyLimits::default()
+        });
+        let mut rule = crate::rules::Rule::new("expand body".into());
+        rule.scope = crate::rules::RuleScope::Body;
+        rule.set_pattern("a".into()).unwrap();
+        rule.replacement = "a".repeat(16);
+        ctx.rules.write().push(rule);
+        let (address, cancel, server) = start_proxy(ctx).await;
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        let driver = tokio::spawn(connection);
+        let response = sender
+            .send_request(
+                hyper::Request::builder()
+                    .method("POST")
+                    .uri("http://localhost:1/")
+                    .header("host", "localhost:1")
+                    .body(Full::new(Bytes::from_static(b"a")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 502);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("Rewritten value exceeds configured limit")
+        );
+        assert!(matches!(
+            events.recv().await,
+            Some(ProxyToUi::RequestCaptured(_))
+        ));
+        assert!(matches!(
+            events.recv().await,
+            Some(ProxyToUi::RequestError(_, _))
+        ));
+        drop(sender);
+        driver.abort();
+        cancel.cancel();
+        server.await.unwrap().unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn grpc_response_arrives_before_client_closes_request_stream() {
     within(async {
         let (ctx, mut events) = crate::test_support::context(ProxyLimits::default());

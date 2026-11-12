@@ -15,7 +15,14 @@ impl App {
     }
 
     pub(super) fn forward_edited_intercept(&mut self) {
-        if let Some(original) = self.intercept_ui.queue.front() {
+        if let Some(id) = self.intercept_ui.editing_id
+            && let Some(index) = self
+                .intercept_ui
+                .queue
+                .iter()
+                .position(|request| request.id == id)
+        {
+            let original = &self.intercept_ui.queue[index];
             let edited = match codec::lines_to_request(&self.intercept_ui.editor.lines, original) {
                 Ok(edited) => edited,
                 Err(error) => {
@@ -23,11 +30,16 @@ impl App {
                     return;
                 }
             };
-            self.intercept_state
-                .resolve(original.id, InterceptDecision::ForwardEdited(edited));
-            self.intercept_ui.queue.pop_front();
+            if !self
+                .intercept_state
+                .resolve(id, InterceptDecision::ForwardEdited(edited))
+            {
+                self.set_status("Intercepted request was cancelled; edits discarded");
+            }
+            self.intercept_ui.queue.remove(index);
         }
         self.intercept_ui.editing = false;
+        self.intercept_ui.editing_id = None;
         self.intercept_ui.editor = TextEditor::new(vec![], self.editor_mode);
         self.intercept_ui.scroll = 0;
     }
@@ -272,6 +284,77 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn editing_intercept_pair() -> (
+        App,
+        crate::proxy::intercept::PendingDecision,
+        crate::proxy::intercept::PendingDecision,
+    ) {
+        let (mut app, mut events) = crate::test_support::app();
+        app.intercept_state.toggle();
+        let mut first = crate::test_support::request();
+        first.uri = "http://example.com/first".into();
+        let mut second = crate::test_support::request();
+        second.uri = "http://example.com/second".into();
+        let first_pending = app
+            .intercept_state
+            .intercept_request(&first, &app.ui_tx)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_pending = app
+            .intercept_state
+            .intercept_request(&second, &app.ui_tx)
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            app.handle_proxy_message(events.recv().await.unwrap());
+        }
+        app.handle_proxy_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('e'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(app.intercept_ui.editing_id, Some(first.id));
+        (app, first_pending, second_pending)
+    }
+
+    #[tokio::test]
+    async fn cancelled_intercept_discards_editor_instead_of_editing_next_request() {
+        let (mut app, first_pending, _second_pending) = editing_intercept_pair().await;
+        drop(first_pending);
+        app.prepare_render();
+        assert!(!app.intercept_ui.editing);
+        assert!(app.intercept_ui.editing_id.is_none());
+        assert!(!app.intercept_ui.editor.has_content());
+        let second_id = app.intercept_ui.queue.front().unwrap().id;
+        app.forward_edited_intercept();
+        assert!(app.intercept_state.is_pending(second_id));
+        assert_eq!(app.intercept_ui.queue.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_intercept_cannot_forward_edits_even_before_render_cleanup() {
+        let (mut app, first_pending, _second_pending) = editing_intercept_pair().await;
+        drop(first_pending);
+        let second_id = app.intercept_ui.queue[1].id;
+        app.forward_edited_intercept();
+        assert!(app.intercept_state.is_pending(second_id));
+        assert_eq!(app.intercept_ui.queue.front().unwrap().id, second_id);
+    }
+
+    #[tokio::test]
+    async fn live_intercept_receives_its_own_edits() {
+        let (mut app, first_pending, _second_pending) = editing_intercept_pair().await;
+        let id = app.intercept_ui.editing_id.unwrap();
+        app.intercept_ui.editor.lines[0] = "GET http://example.com/edited HTTP/1.1".into();
+        app.forward_edited_intercept();
+        let InterceptDecision::ForwardEdited(edited) = first_pending.await.unwrap() else {
+            panic!("expected edited request")
+        };
+        assert_eq!(edited.id, id);
+        assert_eq!(edited.uri, "http://example.com/edited");
+    }
 
     #[test]
     fn stale_repeater_completion_cannot_replace_current_operation() {
