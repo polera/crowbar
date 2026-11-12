@@ -1,6 +1,6 @@
 [package]
 name = "crowbar"
-version = "0.5.3"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.88"
 description = "A TUI web security testing proxy"
