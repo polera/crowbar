@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -13,6 +14,7 @@ use hyper::client::conn::http1::Builder as ClientBuilder;
 use hyper::server::conn::http1::Builder as ServerBuilder;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::sync::{Mutex, OnceCell};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_util::sync::PollSender;
 use tracing::{debug, error, warn};
@@ -541,7 +543,11 @@ impl http_body::Body for H2Body {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.data.is_none() && self.trailers.is_none()
+        self.data.as_ref().is_none_or(Bytes::is_empty) && self.trailers.is_none()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.data.as_ref().map_or(0, |data| data.len() as u64))
     }
 }
 
@@ -746,6 +752,13 @@ impl http_body::Body for H2RespBody {
             H2RespBody::Streaming(b) => b.is_end_stream(),
         }
     }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        match self {
+            H2RespBody::Buffered(body) => body.size_hint(),
+            H2RespBody::Streaming(body) => body.size_hint(),
+        }
+    }
 }
 
 async fn run_h2_tunnel(
@@ -754,23 +767,30 @@ async fn run_h2_tunnel(
     port: u16,
     ctx: ProxyContext,
 ) -> anyhow::Result<()> {
-    let upstream_sender = match establish_h2_upstream(host, port, &ctx).await {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(
-                "Failed to establish h2 upstream to {}:{}: {}",
-                host, port, e
-            );
-            return Err(e);
-        }
-    };
-
+    // Negotiate each side independently. An h2 browser connection does not imply
+    // that the origin supports h2. Initialize inside the service so connection
+    // failures produce a 502 instead of abruptly closing the browser's tunnel.
+    let upstream = Arc::new(OnceCell::new());
     let host = host.to_string();
     let svc = service_fn(move |req: Request<Incoming>| {
         let host = host.clone();
         let ctx = ctx.clone();
-        let sender = upstream_sender.clone();
-        async move { handle_h2_request(req, &host, port, &ctx, sender).await }
+        let upstream = upstream.clone();
+        async move {
+            let sender = match upstream
+                .get_or_try_init(|| establish_h2_upstream(&host, port, &ctx))
+                .await
+            {
+                Ok(sender) => sender.clone(),
+                Err(error) => {
+                    warn!("Failed to establish upstream to {host}:{port}: {error}");
+                    return Ok(h2_bad_gateway(&format!(
+                        "Upstream connection failed: {error}"
+                    )));
+                }
+            };
+            handle_h2_request(req, &host, port, &ctx, sender).await
+        }
     });
 
     hyper::server::conn::http2::Builder::new(TokioExecutor::new())
@@ -780,11 +800,34 @@ async fn run_h2_tunnel(
     Ok(())
 }
 
+#[derive(Clone)]
+enum H2Upstream {
+    Http2(hyper::client::conn::http2::SendRequest<H2RespBody>),
+    Http1(Arc<Mutex<hyper::client::conn::http1::SendRequest<H2RespBody>>>),
+}
+
+async fn establish_h1_upstream(
+    stream: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    ctx: &ProxyContext,
+) -> anyhow::Result<hyper::client::conn::http1::SendRequest<H2RespBody>> {
+    let (sender, conn) = ClientBuilder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .handshake(TokioIo::new(stream))
+        .await?;
+    ctx.spawn(async move {
+        if let Err(error) = conn.await {
+            debug!("HTTP/1 upstream connection ended: {error}");
+        }
+    });
+    Ok(sender)
+}
+
 async fn establish_h2_upstream(
     host: &str,
     port: u16,
     ctx: &ProxyContext,
-) -> anyhow::Result<hyper::client::conn::http2::SendRequest<H2RespBody>> {
+) -> anyhow::Result<H2Upstream> {
     let client_config = ctx.tls_h2_client_config.clone();
 
     let tcp = crate::proxy::connect_tcp(host, port).await?;
@@ -792,6 +835,12 @@ async fn establish_h2_upstream(
     let server_name = crate::tls::server_name_or_localhost(host);
     let connector = TlsConnector::from(client_config);
     let tls_stream = crate::proxy::io_timeout(connector.connect(server_name, tcp)).await?;
+
+    if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
+        debug!("Upstream {host}:{port} did not negotiate h2; using HTTP/1.1");
+        let sender = establish_h1_upstream(tls_stream, ctx).await?;
+        return Ok(H2Upstream::Http1(Arc::new(Mutex::new(sender))));
+    }
 
     let io = TokioIo::new(tls_stream);
     let (sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
@@ -804,7 +853,7 @@ async fn establish_h2_upstream(
         }
     });
 
-    Ok(sender)
+    Ok(H2Upstream::Http2(sender))
 }
 
 async fn handle_h2_request(
@@ -812,13 +861,16 @@ async fn handle_h2_request(
     host: &str,
     port: u16,
     ctx: &ProxyContext,
-    mut upstream: hyper::client::conn::http2::SendRequest<H2RespBody>,
+    upstream: H2Upstream,
 ) -> Result<hyper::Response<H2RespBody>, Infallible> {
     let in_scope = ctx.scope.is_in_scope(host);
     let request_id = RequestId::next();
     let timing = TimingContext::new();
 
     let is_grpc = is_grpc_request(&req);
+    if is_grpc && matches!(&upstream, H2Upstream::Http1(_)) {
+        return Ok(h2_bad_gateway("gRPC requires an HTTP/2 upstream"));
+    }
     let method = req.method().clone();
 
     let headers = crate::http::models::extract_headers(req.headers());
@@ -971,9 +1023,43 @@ async fn handle_h2_request(
             trailers: None,
         })
     };
-    let upstream_req = Request::from_parts(upstream_parts, upstream_body);
+    let mut upstream_req = Request::from_parts(upstream_parts, upstream_body);
 
-    let upstream_resp = match crate::proxy::io_timeout(upstream.send_request(upstream_req)).await {
+    let response = crate::proxy::io_timeout(async {
+        match upstream {
+            H2Upstream::Http2(mut sender) => sender
+                .send_request(upstream_req)
+                .await
+                .map_err(anyhow::Error::from),
+            H2Upstream::Http1(sender) => {
+                *upstream_req.version_mut() = hyper::Version::HTTP_11;
+                *upstream_req.uri_mut() = target.path_and_query.parse::<http::Uri>()?;
+                // HTTP/2 clients normally use :authority rather than Host.
+                upstream_req
+                    .headers_mut()
+                    .insert(http::header::HOST, authority.parse()?);
+                let mut sender = sender.lock().await;
+                if sender.ready().await.is_err() {
+                    // Reconnect only before sending, never retry a possibly
+                    // processed request (especially POSTs).
+                    let tcp = crate::proxy::connect_tcp(host, port).await?;
+                    let mut config = (*ctx.tls_client_config).clone();
+                    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+                    let connector = TlsConnector::from(Arc::new(config));
+                    let stream = connector
+                        .connect(crate::tls::server_name_or_localhost(host), tcp)
+                        .await?;
+                    *sender = establish_h1_upstream(stream, ctx).await?;
+                }
+                sender
+                    .send_request(upstream_req)
+                    .await
+                    .map_err(anyhow::Error::from)
+            }
+        }
+    })
+    .await;
+    let upstream_resp = match response {
         Ok(resp) => resp,
         Err(e) => {
             warn!("H2 upstream request to {}:{} failed: {}", host, port, e);
@@ -1068,6 +1154,7 @@ async fn build_buffered_response(
     ctx: &ProxyContext,
 ) -> Result<hyper::Response<H2RespBody>, Infallible> {
     let request_id = request.id;
+    let response_version = upstream_resp.version().into();
     timing.first_byte = Some(Instant::now());
 
     let (_, resp_body_incoming) = upstream_resp.into_parts();
@@ -1143,7 +1230,7 @@ async fn build_buffered_response(
     let response_data = ResponseData {
         status: resp_status,
         reason: crate::http::models::status_reason(resp_status).to_string(),
-        version: HttpVersion::Http2,
+        version: response_version,
         headers: resp_headers_mut.clone(),
         body: resp_body.clone(),
         trailers: trailer_pairs,
@@ -1205,7 +1292,16 @@ mod tests {
             let service = service_fn(move |request| {
                 let ctx = ctx.clone();
                 let upstream = upstream.clone();
-                async move { handle_h2_request(request, "example.com", 443, &ctx, upstream).await }
+                async move {
+                    handle_h2_request(
+                        request,
+                        "example.com",
+                        443,
+                        &ctx,
+                        H2Upstream::Http2(upstream),
+                    )
+                    .await
+                }
             });
             let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(proxy_io), service)

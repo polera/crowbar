@@ -308,6 +308,148 @@ async fn oversized_request_rewrite_returns_502_and_reports_the_error() {
 }
 
 #[tokio::test]
+async fn h2_browser_falls_back_to_http1_upstreams() {
+    h2_browser_round_trip(Some(b"http/1.1")).await;
+    h2_browser_round_trip(None).await;
+}
+
+#[tokio::test]
+async fn h2_browser_keeps_http2_when_upstream_negotiates_it() {
+    h2_browser_round_trip(Some(b"h2")).await;
+}
+
+async fn h2_browser_round_trip(protocol: Option<&'static [u8]>) {
+    within(async {
+        let (ctx, mut events) = crate::test_support::context(ProxyLimits::default());
+        let mut config = (*crate::tls::cert_gen::build_server_config(
+            ctx.cert_cache.get_or_generate("localhost").await.unwrap(),
+        )
+        .unwrap()).clone();
+        config.alpn_protocols = protocol.into_iter().map(<[u8]>::to_vec).collect();
+        let client_config = ctx.tls_h2_client_config.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h2 = protocol == Some(b"h2");
+        let upstream = tokio::spawn(async move {
+            // HTTP/1 origins close after each response to exercise reconnection.
+            for _ in 0..if h2 { 1 } else { 2 } {
+                let (stream, _) = listener.accept().await.unwrap();
+                let stream = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config.clone()))
+                    .accept(stream).await.unwrap();
+                assert_eq!(stream.get_ref().1.alpn_protocol(), protocol);
+                let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| async move {
+                    assert_eq!(request.version(), if h2 { hyper::Version::HTTP_2 } else { hyper::Version::HTTP_11 });
+                    assert_eq!(request.method(), "POST");
+                    assert_eq!(request.uri().path_and_query().unwrap().as_str(), "/test?q=1");
+                    if !h2 {
+                        assert_eq!(request.headers()["host"], format!("localhost:{port}"));
+                        assert!(request.uri().scheme().is_none());
+                        assert_eq!(request.headers()["content-length"], "12");
+                        assert!(!request.headers().contains_key("transfer-encoding"));
+                    }
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    assert_eq!(body, "request body");
+                    let mut response = hyper::Response::builder().header("content-length", "2");
+                    if !h2 {
+                        response = response.header("connection", "close");
+                    }
+                    Ok::<_, Infallible>(response.body(Full::new(Bytes::from_static(b"ok"))).unwrap())
+                });
+                if h2 {
+                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), service).await;
+                } else {
+                    hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service).await.unwrap();
+                }
+            }
+        });
+        let (address, cancel, server) = start_proxy(ctx).await;
+        let stream = connect_tunnel(address, port).await;
+        let stream = tokio_rustls::TlsConnector::from(client_config)
+            .connect(crate::tls::server_name_or_localhost("localhost"), stream)
+            .await.unwrap();
+        assert_eq!(stream.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+        let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .handshake(TokioIo::new(stream)).await.unwrap();
+        let driver = tokio::spawn(connection);
+        for _ in 0..2 {
+            let request = hyper::Request::builder()
+                .method("POST")
+                .uri(format!("https://localhost:{port}/test?q=1"))
+                .body(Full::new(Bytes::from_static(b"request body"))).unwrap();
+            let response = sender.send_request(request).await.unwrap();
+            assert_eq!(response.version(), hyper::Version::HTTP_2);
+            assert_eq!(response.status(), 200);
+            assert!(!response.headers().contains_key("connection"));
+            assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), "ok");
+            assert!(matches!(events.recv().await, Some(ProxyToUi::RequestCaptured(request))
+                if request.version == crate::http::models::HttpVersion::Http2));
+            assert!(matches!(events.recv().await, Some(ProxyToUi::ResponseReceived(_, response))
+                if response.version == if h2 { crate::http::models::HttpVersion::Http2 } else { crate::http::models::HttpVersion::Http11 }));
+        }
+        drop(sender);
+        driver.abort();
+        cancel.cancel();
+        server.await.unwrap().unwrap();
+        upstream.await.unwrap();
+    }).await;
+}
+
+#[tokio::test]
+async fn h2_upstream_connection_failure_returns_502_without_closing_tunnel() {
+    within(async {
+        let (ctx, _events) = crate::test_support::context(ProxyLimits::default());
+        let client_config = ctx.tls_h2_client_config.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                // The origin drops the connection before completing TLS.
+                drop(stream);
+            }
+        });
+        let (address, cancel, server) = start_proxy(ctx).await;
+        let stream = connect_tunnel(address, port).await;
+        let stream = tokio_rustls::TlsConnector::from(client_config)
+            .connect(crate::tls::server_name_or_localhost("localhost"), stream)
+            .await
+            .unwrap();
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .handshake(TokioIo::new(stream))
+                .await
+                .unwrap();
+        let driver = tokio::spawn(connection);
+        for _ in 0..2 {
+            let response = sender
+                .send_request(
+                    hyper::Request::builder()
+                        .uri(format!("https://localhost:{port}/"))
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 502);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(
+                std::str::from_utf8(&body)
+                    .unwrap()
+                    .contains("Upstream connection failed")
+            );
+        }
+        drop(sender);
+        driver.abort();
+        cancel.cancel();
+        server.await.unwrap().unwrap();
+        upstream.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn grpc_response_arrives_before_client_closes_request_stream() {
     within(async {
         let (ctx, mut events) = crate::test_support::context(ProxyLimits::default());

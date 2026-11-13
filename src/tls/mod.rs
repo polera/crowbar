@@ -18,7 +18,7 @@ pub fn build_tls_client_config() -> Arc<rustls::ClientConfig> {
 
 pub fn build_tls_h2_client_config() -> Arc<rustls::ClientConfig> {
     let mut config = base_client_config();
-    config.alpn_protocols = vec![b"h2".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Arc::new(config)
 }
 

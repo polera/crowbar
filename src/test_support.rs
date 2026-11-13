@@ -60,7 +60,7 @@ pub fn context(limits: ProxyLimits) -> (ProxyContext, mpsc::Receiver<ProxyToUi>)
         .with_root_certificates(roots)
         .with_no_client_auth();
     let mut h2_config = config.clone();
-    h2_config.alpn_protocols = vec![b"h2".to_vec()];
+    h2_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let (sender, receiver) = mpsc::channel(1024);
     let mut ctx = ProxyContext::new(
         sender,

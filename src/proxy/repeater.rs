@@ -56,6 +56,8 @@ pub async fn send_raw_request(
                 .await
                 .context("replay TLS handshake")?;
         timing.tls_done = Some(Instant::now());
+        let h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
+        anyhow::ensure!(!request.is_grpc || h2, "gRPC requires an HTTP/2 upstream");
         send_via(stream, &request, &target, timing, limits, h2).await
     } else {
         send_via(tcp, &request, &target, timing, limits, h2).await
